@@ -5,7 +5,7 @@ Desktop.ini
 *.swp
 *.swo
 *~
-
+.metals/
 # IDEs
 .idea/
 *.iml
