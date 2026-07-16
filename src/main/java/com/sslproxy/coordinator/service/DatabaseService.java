@@ -107,7 +107,7 @@ public class DatabaseService {
                 () -> parseLongOrZero(observeDb("coordinator.pending_ledger_count", () -> jdbc.queryForObject(
                         "SELECT coordinator.pending_ledger_count()::text",
                         String.class
-                )), "coordinator.pending_ledger_count"),
+                ))),
                 "coordinator.pending_ledger_count"
         );
     }
@@ -131,7 +131,7 @@ public class DatabaseService {
                     props.scanRetryBackoffSeconds(),
                     props.ingestBatchSize()
             ));
-            return parseLongOrZero(result, "coordinator.process_ingest_ledger");
+            return parseLongOrZero(result);
         }, "coordinator.process_ingest_ledger");
     }
 
@@ -212,7 +212,7 @@ public class DatabaseService {
                     props.batchDispatchLeaseSeconds(),
                     props.batchMaxAttempts()
             ));
-            return parseIntOrZero(result, "coordinator.recover_stale_dispatched_batches");
+            return parseIntOrZero(result);
         }, "coordinator.recover_stale_dispatched_batches");
     }
 
@@ -346,8 +346,10 @@ public class DatabaseService {
 
     public DbResult<Void> saveBacklogEntry(String payloadJson) {
         return DbResult.run(
-                () -> observeDb("coordinator.save_backlog_entry",
-                        () -> jdbc.update("SELECT coordinator.save_backlog_entry(?::jsonb)", payloadJson)),
+                () -> observeDb("coordinator.save_backlog_entry", () -> {
+                    jdbc.query("SELECT coordinator.save_backlog_entry(?::jsonb)", ignored -> { }, payloadJson);
+                    return null;
+                }),
                 "coordinator.save_backlog_entry"
         );
     }
@@ -364,8 +366,10 @@ public class DatabaseService {
 
     public DbResult<Void> markBacklogSynced(String dedupeKey) {
         return DbResult.run(
-                () -> observeDb("coordinator.mark_backlog_synced",
-                        () -> jdbc.update("SELECT coordinator.mark_backlog_synced(?::text)", dedupeKey)),
+                () -> observeDb("coordinator.mark_backlog_synced", () -> {
+                    jdbc.query("SELECT coordinator.mark_backlog_synced(?::text)", ignored -> { }, dedupeKey);
+                    return null;
+                }),
                 "coordinator.mark_backlog_synced"
         );
     }
@@ -409,8 +413,10 @@ public class DatabaseService {
 
     public DbResult<Void> flushProbeBatch(String probesJson) {
         return DbResult.run(
-                () -> observeDb("coordinator.flush_probe_batch",
-                        () -> jdbc.update("SELECT coordinator.flush_probe_batch(?::jsonb)", probesJson)),
+                () -> observeDb("coordinator.flush_probe_batch", () -> {
+                    jdbc.query("SELECT coordinator.flush_probe_batch(?::jsonb)", ignored -> { }, probesJson);
+                    return null;
+                }),
                 "coordinator.flush_probe_batch"
         );
     }
@@ -524,7 +530,7 @@ public class DatabaseService {
     }
 
     private int queryForInt(Connection connection, String sql, Array... arrays) throws SQLException {
-        return parseIntOrZero(queryForSingleText(connection, sql, arrays), sql);
+        return parseIntOrZero(queryForSingleText(connection, sql, arrays));
     }
 
     private String queryForSingleText(Connection connection, String sql, Array... arrays) throws SQLException {
@@ -538,28 +544,18 @@ public class DatabaseService {
         }
     }
 
-    private int parseIntOrZero(String result, String operation) {
+    private int parseIntOrZero(String result) {
         if (result == null || result.isBlank()) {
             return 0;
         }
-        try {
-            return Integer.parseInt(result.trim());
-        } catch (NumberFormatException e) {
-            log.warn("{} returned non-numeric: {}", operation, result);
-            return 0;
-        }
+        return Integer.parseInt(result.trim());
     }
 
-    private long parseLongOrZero(String result, String operation) {
+    private long parseLongOrZero(String result) {
         if (result == null || result.isBlank()) {
             return 0L;
         }
-        try {
-            return Long.parseLong(result.trim());
-        } catch (NumberFormatException e) {
-            log.warn("{} returned non-numeric: {}", operation, result);
-            return 0L;
-        }
+        return Long.parseLong(result.trim());
     }
 
     private String blankToNull(String value) {

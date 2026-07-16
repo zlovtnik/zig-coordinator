@@ -22,9 +22,9 @@ class BoundedAccumulatorTest {
     void requeueFrontPreservesOrderUpToCapacity() {
         BoundedAccumulator<Integer> accumulator = new BoundedAccumulator<>("test", 5);
 
-        int dropped = accumulator.requeueFront(List.of(1, 2, 3));
+        List<Integer> rejected = accumulator.requeueFront(List.of(1, 2, 3));
 
-        assertEquals(0, dropped);
+        assertTrue(rejected.isEmpty());
         assertEquals(List.of(1, 2, 3), accumulator.drain(10));
     }
 
@@ -42,9 +42,9 @@ class BoundedAccumulatorTest {
     void requeueFrontDropsItemsThatCannotBeOffered() {
         BoundedAccumulator<Integer> accumulator = new BoundedAccumulator<>("test", 2);
 
-        int dropped = accumulator.requeueFront(List.of(1, 2, 3));
+        List<Integer> rejected = accumulator.requeueFront(List.of(1, 2, 3));
 
-        assertEquals(1, dropped);
+        assertEquals(List.of(1), rejected);
         assertEquals(List.of(2, 3), accumulator.drain(10));
     }
 }

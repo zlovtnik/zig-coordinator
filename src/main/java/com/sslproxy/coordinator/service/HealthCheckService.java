@@ -16,13 +16,16 @@ public class HealthCheckService {
     private static final Logger log = LoggerFactory.getLogger(HealthCheckService.class);
 
     private final DatabaseService db;
+    private final RedpandaLagMetricsService redpandaLagMetricsService;
     private final OracleSinkProperties oracleSinkProperties;
     private final OracleConnectionFactory oracleConnectionFactory;
 
     public HealthCheckService(DatabaseService db,
+                              RedpandaLagMetricsService redpandaLagMetricsService,
                               OracleSinkProperties oracleSinkProperties,
                               OracleConnectionFactory oracleConnectionFactory) {
         this.db = db;
+        this.redpandaLagMetricsService = redpandaLagMetricsService;
         this.oracleSinkProperties = oracleSinkProperties;
         this.oracleConnectionFactory = oracleConnectionFactory;
     }
@@ -34,6 +37,7 @@ public class HealthCheckService {
         log.info("event=healthcheck status=start");
         checkPostgres();
         checkPostgresCursors();
+        checkRedpanda();
         checkOracle();
         log.info("event=healthcheck status=ok");
     }
@@ -61,6 +65,16 @@ public class HealthCheckService {
         } catch (Exception e) {
             log.error("event=healthcheck_step step=check_cursors status=error error={}", e.getMessage());
             throw new RuntimeException("Cursor check failed", e);
+        }
+    }
+
+    private void checkRedpanda() {
+        try {
+            redpandaLagMetricsService.checkConnectivity();
+            log.info("event=healthcheck_step step=check_redpanda status=ok");
+        } catch (Exception e) {
+            log.error("event=healthcheck_step step=check_redpanda status=error error={}", e.getMessage());
+            throw new RuntimeException("Redpanda connectivity check failed", e);
         }
     }
 

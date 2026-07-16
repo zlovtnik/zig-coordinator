@@ -128,6 +128,10 @@ public class AdaptivePullController {
                     : props.scanFetchCount();
             long now = System.currentTimeMillis();
             RouteState state = routeStates.getOrDefault(routeId, RouteState.initial(current));
+            if (state.stopped()) {
+                recoverStoppedRoute(routeId, config, state);
+                return;
+            }
             RouteAdjustment decision = decideAdjustment(
                     pendingCount,
                     budget,
@@ -187,25 +191,35 @@ public class AdaptivePullController {
             var status = routeController.getRouteStatus(routeId);
             boolean isSuspended = status != null && status.isSuspended();
 
-            config.setMaxPollRecords(maxPollRecords);
-
             if (isSuspended) {
-                routeStates.compute(routeId, (ignored, state) ->
-                        (state == null ? RouteState.initial(current) : state)
-                                .withApplied(maxPollRecords)
-                                .withSuspended(true));
-                log.info("event=adaptive_pull_endpoint status=adjusted_no_restart route={} "
-                                + "old_max_poll_records={} new_max_poll_records={} reason=route_suspended",
-                        routeId, current, maxPollRecords);
+                log.info("event=adaptive_pull_endpoint status=skipped_suspended route={} "
+                                + "reason=route_suspended_resume_will_apply",
+                        routeId);
                 return;
             }
+
+            config.setMaxPollRecords(maxPollRecords);
 
             log.info("event=adaptive_pull_endpoint status=adjusted route={} "
                             + "old_max_poll_records={} new_max_poll_records={}",
                     routeId, current, maxPollRecords);
 
             routeController.stopRoute(routeId);
-            routeController.startRoute(routeId);
+            try {
+                routeController.startRoute(routeId);
+            } catch (Exception startFailure) {
+                config.setMaxPollRecords(current);
+                try {
+                    routeController.startRoute(routeId);
+                } catch (Exception recoveryFailure) {
+                    startFailure.addSuppressed(recoveryFailure);
+                    routeStates.compute(routeId, (ignored, state) ->
+                            (state == null ? RouteState.initial(current) : state)
+                                    .withApplied(current)
+                                    .withStopped(true));
+                }
+                throw startFailure;
+            }
             routeStates.compute(routeId, (ignored, state) ->
                     (state == null ? RouteState.initial(current) : state)
                             .withApplied(maxPollRecords)
@@ -214,6 +228,23 @@ public class AdaptivePullController {
             log.info("event=adaptive_pull_endpoint status=restarted route={}", routeId);
         } finally {
             unlockRouteUpdate(routeId, "adaptive_pull");
+        }
+    }
+
+    private void recoverStoppedRoute(String routeId,
+                                     KafkaConfiguration config,
+                                     RouteState state) throws Exception {
+        if (!tryLockRouteUpdate(routeId, "adaptive_pull_recovery")) {
+            return;
+        }
+        try {
+            config.setMaxPollRecords(state.lastAppliedMaxPollRecords());
+            camelContext.getRouteController().startRoute(routeId);
+            routeStates.put(routeId, state.withStopped(false));
+            log.info("event=adaptive_pull_endpoint status=recovered route={} max_poll_records={}",
+                    routeId, state.lastAppliedMaxPollRecords());
+        } finally {
+            unlockRouteUpdate(routeId, "adaptive_pull_recovery");
         }
     }
 
@@ -253,21 +284,26 @@ public class AdaptivePullController {
 
     private record RouteState(int lastAppliedMaxPollRecords,
                               long lastRestartTimestampMs,
-                              boolean suspended) {
+                              boolean suspended,
+                              boolean stopped) {
         private static RouteState initial(int currentMaxPollRecords) {
-            return new RouteState(currentMaxPollRecords, 0L, false);
+            return new RouteState(currentMaxPollRecords, 0L, false, false);
         }
 
         private RouteState withApplied(int maxPollRecords) {
-            return new RouteState(maxPollRecords, lastRestartTimestampMs, suspended);
+            return new RouteState(maxPollRecords, lastRestartTimestampMs, suspended, stopped);
         }
 
         private RouteState withRestart(long timestampMs) {
-            return new RouteState(lastAppliedMaxPollRecords, timestampMs, suspended);
+            return new RouteState(lastAppliedMaxPollRecords, timestampMs, suspended, stopped);
         }
 
         private RouteState withSuspended(boolean isSuspended) {
-            return new RouteState(lastAppliedMaxPollRecords, lastRestartTimestampMs, isSuspended);
+            return new RouteState(lastAppliedMaxPollRecords, lastRestartTimestampMs, isSuspended, stopped);
+        }
+
+        private RouteState withStopped(boolean isStopped) {
+            return new RouteState(lastAppliedMaxPollRecords, lastRestartTimestampMs, suspended, isStopped);
         }
     }
 }

@@ -69,7 +69,7 @@ public class OracleLoadRoute extends RouteBuilder {
             String failureStage = batchId.isBlank() ? "decode" : "handle";
             OracleErrorClass errorClass = batchId.isBlank() || e instanceof com.fasterxml.jackson.core.JsonProcessingException
                     ? OracleErrorClass.PERMANENT
-                    : OracleErrorClass.classify(e.getMessage());
+                    : OracleErrorClass.classify(e);
             log.error("event=oracle_load_route status={}_failed job_id={} batch_id={} error=\"{}\"",
                     failureStage, jobId, batchId, sanitize(e.getMessage()));
             return OracleResult.failure(jobId, batchId, errorClass,

@@ -33,17 +33,19 @@ public final class BoundedAccumulator<T> {
         return Collections.unmodifiableList(batch);
     }
 
-    public int requeueFront(List<T> items) {
+    public List<T> requeueFront(List<T> items) {
         if (items.isEmpty()) {
-            return 0;
+            return List.of();
         }
-        int requeued = 0;
+        List<T> rejected = new ArrayList<>();
         for (int i = items.size() - 1; i >= 0; i--) {
-            if (queue.offerFirst(items.get(i))) {
-                requeued++;
+            T item = items.get(i);
+            if (!queue.offerFirst(item)) {
+                rejected.add(item);
             }
         }
-        return items.size() - requeued;
+        Collections.reverse(rejected);
+        return Collections.unmodifiableList(rejected);
     }
 
     public int size() {

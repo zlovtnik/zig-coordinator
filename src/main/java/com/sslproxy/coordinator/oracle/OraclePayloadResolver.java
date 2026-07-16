@@ -7,6 +7,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -68,17 +69,31 @@ public class OraclePayloadResolver {
     }
 
     private String resolveOutbox(String relativePath) {
+        if (relativePath.isBlank()) {
+            throw new IllegalArgumentException("invalid blank outbox path");
+        }
+        Path relative = Path.of(relativePath);
+        if (relative.isAbsolute() || relative.normalize().startsWith("..")) {
+            throw new IllegalArgumentException("invalid outbox path escapes base");
+        }
         try {
             Path outboxBase = Path.of(syncOutboxDir).toRealPath();
-            Path resolved = outboxBase.resolve(relativePath).normalize().toRealPath();
+            Path unresolved = outboxBase.resolve(relative.normalize()).normalize();
+            if (!unresolved.startsWith(outboxBase)) {
+                throw new IllegalArgumentException("invalid outbox path escapes base");
+            }
+            Path resolved = unresolved.toRealPath();
             if (!resolved.startsWith(outboxBase)) {
-                throw new IllegalArgumentException("invalid outbox path escapes base: " + resolved);
+                throw new IllegalArgumentException("invalid outbox path escapes base");
             }
             String payload = Files.readString(resolved);
             validateJson(payload);
             return payload;
         } catch (IOException e) {
-            throw new IllegalArgumentException("resolve outbox path " + relativePath + ": " + e.getMessage(), e);
+            if (e instanceof InterruptedIOException) {
+                Thread.currentThread().interrupt();
+            }
+            throw new OraclePayloadReadException("outbox payload read failed", e);
         }
     }
 
@@ -150,5 +165,11 @@ public class OraclePayloadResolver {
             return encoded;
         }
         return encoded + "=".repeat(4 - remainder);
+    }
+}
+
+final class OraclePayloadReadException extends RuntimeException {
+    OraclePayloadReadException(String message, IOException cause) {
+        super(message, cause);
     }
 }

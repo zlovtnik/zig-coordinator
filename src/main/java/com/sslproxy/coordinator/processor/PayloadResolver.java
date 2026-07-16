@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -48,12 +49,18 @@ public class PayloadResolver {
 
         if (payloadRef.startsWith(INLINE_PREFIX)) {
             String encoded = payloadRef.substring(INLINE_PREFIX.length());
+            if (decodedLength(encoded) > MAX_PAYLOAD_BYTES) {
+                throw new IllegalArgumentException("Inline payload too large");
+            }
             byte[] decoded;
             try {
                 decoded = Base64.getUrlDecoder().decode(encoded);
             } catch (IllegalArgumentException e) {
                 log.error("Invalid inline payload encoding: {}", e.getMessage());
                 throw new IllegalArgumentException("Invalid inline payload encoding", e);
+            }
+            if (decoded.length > MAX_PAYLOAD_BYTES) {
+                throw new IllegalArgumentException("Inline payload too large");
             }
             validateJson(decoded);
             return decoded;
@@ -85,12 +92,13 @@ public class PayloadResolver {
                     throw new IllegalArgumentException("Outbox file not readable: " + locator);
                 }
 
-                long fileSize = Files.size(realFilePath);
-                if (fileSize > MAX_PAYLOAD_BYTES) {
-                    throw new IllegalArgumentException("Outbox file too large: " + fileSize + " bytes");
+                byte[] payload;
+                try (InputStream input = Files.newInputStream(realFilePath)) {
+                    payload = input.readNBytes(Math.toIntExact(MAX_PAYLOAD_BYTES + 1));
                 }
-
-                byte[] payload = Files.readAllBytes(realFilePath);
+                if (payload.length > MAX_PAYLOAD_BYTES) {
+                    throw new IllegalArgumentException("Outbox file too large");
+                }
                 validateJson(payload);
                 return payload;
             } catch (IOException e) {
@@ -111,6 +119,18 @@ public class PayloadResolver {
         } catch (IOException e) {
             throw new IllegalArgumentException("Payload is not valid JSON", e);
         }
+    }
+
+    private long decodedLength(String encoded) {
+        int padding = 0;
+        if (encoded.endsWith("=")) {
+            padding++;
+        }
+        if (encoded.endsWith("==")) {
+            padding++;
+        }
+        long encodedCharacters = encoded.length() - padding;
+        return encodedCharacters * 6L / 8L;
     }
 
     /**

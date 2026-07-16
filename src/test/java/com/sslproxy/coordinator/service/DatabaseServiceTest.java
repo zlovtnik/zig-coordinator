@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.postgresql.util.PGobject;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.mockito.ArgumentCaptor;
 
 import java.sql.Array;
@@ -130,6 +131,36 @@ class DatabaseServiceTest {
 
         assertEquals("inline://json/eyJvayI6dHJ1ZX0", payloadRef);
         verify(jdbc).queryForList(anyString(), eq(String.class), eq("batch-1"), eq("batch-1"));
+    }
+
+    @Test
+    void selectFunctionsAreExecutedAsQueries() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        DatabaseService service = new DatabaseService(jdbc, CoordinatorProperties.DEFAULTS);
+
+        service.saveBacklogEntry("{\"dedupe_key\":\"one\"}").orElseThrow();
+        service.markBacklogSynced("one").orElseThrow();
+        service.flushProbeBatch("{\"probes\":[]}").orElseThrow();
+
+        verify(jdbc).query(eq("SELECT coordinator.save_backlog_entry(?::jsonb)"),
+                any(RowCallbackHandler.class), eq("{\"dedupe_key\":\"one\"}"));
+        verify(jdbc).query(eq("SELECT coordinator.mark_backlog_synced(?::text)"),
+                any(RowCallbackHandler.class), eq("one"));
+        verify(jdbc).query(eq("SELECT coordinator.flush_probe_batch(?::jsonb)"),
+                any(RowCallbackHandler.class), eq("{\"probes\":[]}"));
+    }
+
+    @Test
+    void malformedNumericFunctionResultPropagatesAsDbError() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.queryForObject("SELECT coordinator.pending_ledger_count()::text", String.class))
+                .thenReturn("not-a-number");
+        DatabaseService service = new DatabaseService(jdbc, CoordinatorProperties.DEFAULTS);
+
+        DbResult<Long> result = service.pendingLedgerCount();
+
+        DbResult.Err<?> error = assertInstanceOf(DbResult.Err.class, result);
+        assertInstanceOf(NumberFormatException.class, error.cause());
     }
 
     @Test

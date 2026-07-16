@@ -5,6 +5,8 @@ import com.sslproxy.coordinator.processor.ResultProcessor;
 import org.apache.camel.Exchange;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.component.kafka.KafkaConstants;
+import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -35,20 +37,36 @@ public class OracleResultRoute extends RouteBuilder {
 
     @Override
     public void configure() {
+        onException(IllegalStateException.class)
+                .onWhen(exchange -> fromRoute(exchange, "oracle-result-consumer"))
+                .maximumRedeliveries(0)
+                .handled(false);
+
         onException(Exception.class)
+                .onWhen(exchange -> fromRoute(exchange, "oracle-result-consumer"))
                 .maximumRedeliveries("{{coordinator.result-route-max-retries:3}}")
                 .redeliveryDelay(500)
                 .useOriginalMessage()
                 .handled(true)
                 .process(exchange -> logRouteFailure(exchange, props.resultTopic() + ".dlq"))
-                .to("kafka:{{coordinator.result-topic}}.dlq");
+                .to("kafka:{{coordinator.result-topic}}.dlq")
+                .process(this::commitOffset);
+
+        onException(Exception.class)
+                .onWhen(exchange -> fromRoute(exchange, "oracle-result-flush-timer"))
+                .maximumRedeliveries("{{coordinator.result-route-max-retries:3}}")
+                .redeliveryDelay(500)
+                .handled(true)
+                .process(this::logTimerFailure);
 
         // Consume from sync.oracle.result with the zig-coordinator-result consumer group
         from("kafka:{{coordinator.result-topic}}"
                 + "?groupId={{coordinator.result-consumer}}"
                 + "&autoOffsetReset=earliest"
                 + "&maxPollRecords={{coordinator.result-fetch-count}}"
-                + "&consumersCount={{coordinator.result-consumers-count}}"
+                + "&consumersCount=1"
+                + "&allowManualCommit=true"
+                + "&autoCommitEnable=false"
                 + "&breakOnFirstError=true")
         .routeId("oracle-result-consumer")
         .process(exchange -> {
@@ -83,6 +101,27 @@ public class OracleResultRoute extends RouteBuilder {
                 .addKeyValue("dlq_topic", dlqTopic)
                 .addKeyValue("error", sanitize(error == null ? "" : error.getMessage()))
                 .log("oracle result routed to DLQ");
+    }
+
+    private void logTimerFailure(Exchange exchange) {
+        Exception error = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception.class);
+        log.atError()
+                .addKeyValue("event", "batch_result_flush")
+                .addKeyValue("status", "failed")
+                .addKeyValue("error", sanitize(error == null ? "" : error.getMessage()))
+                .log("oracle result timer flush failed; records remain buffered");
+    }
+
+    private boolean fromRoute(Exchange exchange, String routeId) {
+        return routeId.equals(exchange.getFromRouteId());
+    }
+
+    private void commitOffset(Exchange exchange) {
+        KafkaManualCommit manualCommit = exchange.getIn()
+                .getHeader(KafkaConstants.MANUAL_COMMIT, KafkaManualCommit.class);
+        if (manualCommit != null) {
+            manualCommit.commit();
+        }
     }
 
     private String sanitize(String message) {

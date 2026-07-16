@@ -80,7 +80,14 @@ public class DataSourceConfig {
             return new DatabaseUrl(jdbcUrl.toString(), username, password);
         }
 
-        throw new IllegalArgumentException("Unsupported PostgreSQL URL scheme: " + rawUrl);
+        String scheme;
+        try {
+            scheme = URI.create(rawUrl).getScheme();
+        } catch (IllegalArgumentException ignored) {
+            scheme = null;
+        }
+        throw new IllegalArgumentException("Unsupported PostgreSQL URL scheme: "
+                + (scheme == null ? "<invalid>" : scheme));
     }
 
     private static String firstNonBlank(String... values) {

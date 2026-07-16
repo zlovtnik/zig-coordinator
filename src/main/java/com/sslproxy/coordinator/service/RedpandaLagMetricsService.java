@@ -141,6 +141,13 @@ public class RedpandaLagMetricsService {
         return List.copyOf(metersByTarget.keySet());
     }
 
+    public void checkConnectivity() throws Exception {
+        LagTarget target = metersByTarget.keySet().stream()
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("no Redpanda lag target configured"));
+        fetchLagSnapshot(getOrCreateAdminClient(), target);
+    }
+
     private void refreshTarget(LagTarget target) {
         try {
             LagSnapshot snapshot = fetchLagSnapshot(getOrCreateAdminClient(), target);
@@ -219,14 +226,12 @@ public class RedpandaLagMetricsService {
 
     private static Map<LagTarget, TargetMeters> registerMeters(MeterRegistry registry, List<LagTarget> targets, Clock clock) {
         Map<LagTarget, TargetMeters> meters = new LinkedHashMap<>();
-        long now = clock.millis();
-
         for (LagTarget target : targets) {
             TargetMeters targetMeters = new TargetMeters(
                     new AtomicLong(0),
                     new AtomicLong(0),
                     new AtomicLong(0),
-                    new AtomicLong(now),
+                    new AtomicLong(0),
                     clock,
                     Counter.builder("coordinator.redpanda.lag.refresh.failures.total")
                             .description("Total Redpanda lag metric refresh failures")

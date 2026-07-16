@@ -6,8 +6,11 @@ import com.sslproxy.coordinator.fp.DbResult;
 import com.sslproxy.coordinator.service.DatabaseService;
 import org.apache.camel.Exchange;
 import org.apache.camel.Message;
+import org.apache.camel.component.kafka.KafkaConstants;
+import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.List;
 
@@ -18,6 +21,7 @@ import static com.sslproxy.coordinator.testsupport.MockitoCaptors.scanRequestRec
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -25,6 +29,22 @@ import static org.mockito.Mockito.when;
 class PayloadAuditRecordProcessorTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void commitsLastPollRecordOnlyAfterDurableBatchWrite() {
+        DatabaseService databaseService = mock(DatabaseService.class);
+        KafkaManualCommit manualCommit = mock(KafkaManualCommit.class);
+        when(databaseService.recordScanRequests(any())).thenReturn(new DbResult.Ok<>(1));
+        PayloadAuditRecordProcessor processor = new PayloadAuditRecordProcessor(
+                objectMapper, databaseService, CoordinatorProperties.DEFAULTS);
+
+        processor.process(exchangeWithBodyAndCommit(
+                "{\"observed_at\":\"2026-06-01T12:00:00Z\",\"host\":\"api.example\"}", manualCommit));
+
+        InOrder ordered = inOrder(databaseService, manualCommit);
+        ordered.verify(databaseService).recordScanRequests(any());
+        ordered.verify(manualCommit).commit();
+    }
 
     @Test
     void translatesPayloadAuditIntoScanRequestRecord() throws Exception {
@@ -48,6 +68,8 @@ class PayloadAuditRecordProcessorTest {
                 """;
 
         processor.process(exchangeWithBody(payload));
+        verify(databaseService, never()).recordScanRequests(any());
+        processor.flushPending();
 
         ArgumentCaptor<List<DatabaseService.ScanRequestRecord>> records = scanRequestRecordListCaptor();
         verify(databaseService).recordScanRequests(records.capture());
@@ -69,7 +91,8 @@ class PayloadAuditRecordProcessorTest {
                 CoordinatorProperties.DEFAULTS
         );
 
-        processor.process(exchangeWithBody("{\"host\":\"api.example\"}"));
+        assertThrows(IllegalArgumentException.class,
+                () -> processor.process(exchangeWithBody("{\"host\":\"api.example\"}")));
 
         verify(databaseService, never()).recordScanRequests(any());
     }
@@ -96,7 +119,8 @@ class PayloadAuditRecordProcessorTest {
                 }
                 """;
 
-        assertThrows(IllegalStateException.class, () -> processor.process(exchangeWithBody(payload)));
+        processor.process(exchangeWithBody(payload));
+        assertThrows(IllegalStateException.class, processor::flushPending);
         processor.flushPending();
 
         ArgumentCaptor<List<DatabaseService.ScanRequestRecord>> records = scanRequestRecordListCaptor();
@@ -110,6 +134,15 @@ class PayloadAuditRecordProcessorTest {
         Message message = mock(Message.class);
         when(exchange.getIn()).thenReturn(message);
         when(message.getBody(String.class)).thenReturn(body);
+        return exchange;
+    }
+
+    private Exchange exchangeWithBodyAndCommit(String body, KafkaManualCommit manualCommit) {
+        Exchange exchange = exchangeWithBody(body);
+        when(exchange.getIn().getHeader(KafkaConstants.MANUAL_COMMIT, KafkaManualCommit.class))
+                .thenReturn(manualCommit);
+        when(exchange.getIn().getHeader(KafkaConstants.LAST_POLL_RECORD, Boolean.class))
+                .thenReturn(true);
         return exchange;
     }
 

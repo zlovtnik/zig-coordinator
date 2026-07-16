@@ -5,6 +5,8 @@ import com.sslproxy.coordinator.processor.PayloadAuditRecordProcessor;
 import org.apache.camel.Exchange;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.component.kafka.KafkaConstants;
+import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -31,18 +33,34 @@ public class PayloadAuditRoute extends RouteBuilder {
 
     @Override
     public void configure() {
+        onException(IllegalStateException.class)
+                .onWhen(exchange -> fromRoute(exchange, "payload-audit-consumer"))
+                .maximumRedeliveries(0)
+                .handled(false);
+
         onException(Exception.class)
+                .onWhen(exchange -> fromRoute(exchange, "payload-audit-consumer"))
                 .maximumRedeliveries("{{coordinator.payload-audit-route-max-retries:3}}")
                 .redeliveryDelay(500)
                 .useOriginalMessage()
                 .handled(true)
                 .process(exchange -> logRouteFailure(exchange, props.payloadAuditTopic() + ".dlq"))
-                .to("kafka:{{coordinator.payload-audit-topic}}.dlq");
+                .to("kafka:{{coordinator.payload-audit-topic}}.dlq")
+                .process(this::commitOffset);
+
+        onException(Exception.class)
+                .onWhen(exchange -> fromRoute(exchange, "payload-audit-flush-timer"))
+                .maximumRedeliveries("{{coordinator.payload-audit-route-max-retries:3}}")
+                .redeliveryDelay(500)
+                .handled(true)
+                .process(this::logTimerFailure);
 
         from("kafka:{{coordinator.payload-audit-topic}}"
                 + "?groupId={{coordinator.payload-audit-consumer}}"
                 + "&autoOffsetReset=earliest"
                 + "&maxPollRecords={{coordinator.scan-fetch-count}}"
+                + "&allowManualCommit=true"
+                + "&autoCommitEnable=false"
                 + "&breakOnFirstError=true")
                 .routeId("payload-audit-consumer")
                 .process(exchange -> {
@@ -73,6 +91,27 @@ public class PayloadAuditRoute extends RouteBuilder {
                 .addKeyValue("dlq_topic", dlqTopic)
                 .addKeyValue("error", sanitize(error == null ? "" : error.getMessage()))
                 .log("payload audit routed to DLQ");
+    }
+
+    private void logTimerFailure(Exchange exchange) {
+        Exception error = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception.class);
+        log.atError()
+                .addKeyValue("event", "payload_audit_flush")
+                .addKeyValue("status", "failed")
+                .addKeyValue("error", sanitize(error == null ? "" : error.getMessage()))
+                .log("payload audit timer flush failed; records remain buffered");
+    }
+
+    private boolean fromRoute(Exchange exchange, String routeId) {
+        return routeId.equals(exchange.getFromRouteId());
+    }
+
+    private void commitOffset(Exchange exchange) {
+        KafkaManualCommit manualCommit = exchange.getIn()
+                .getHeader(KafkaConstants.MANUAL_COMMIT, KafkaManualCommit.class);
+        if (manualCommit != null) {
+            manualCommit.commit();
+        }
     }
 
     private String sanitize(String message) {

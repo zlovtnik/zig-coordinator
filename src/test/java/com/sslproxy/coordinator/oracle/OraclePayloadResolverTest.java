@@ -49,6 +49,16 @@ class OraclePayloadResolverTest {
     }
 
     @Test
+    void treatsMissingOutboxPayloadAsOperationalReadFailure(@TempDir Path root) throws Exception {
+        Path outbox = root.resolve("outbox");
+        Files.createDirectories(outbox);
+        OraclePayloadResolver resolver = new OraclePayloadResolver(outbox.toString(), objectMapper);
+
+        assertThrows(OraclePayloadReadException.class,
+                () -> resolver.resolvePayload("outbox://missing.json"));
+    }
+
+    @Test
     void rejectsProbeEnvelopeWithoutProbesArray() {
         OraclePayloadResolver resolver = new OraclePayloadResolver("/tmp", objectMapper);
 

@@ -45,7 +45,7 @@ public record OracleSinkProperties(
 
     public Optional<String> tnsAliasForValidation() {
         if (conn != null && !conn.isBlank()) {
-            return Optional.of(conn.trim());
+            return validatedAlias(conn);
         }
         if (jdbcUrl == null || jdbcUrl.isBlank()) {
             return Optional.empty();
@@ -57,7 +57,15 @@ public record OracleSinkProperties(
             return Optional.empty();
         }
 
-        String target = trimmed.substring(prefix.length()).trim();
+        return validatedAlias(trimmed.substring(prefix.length()));
+    }
+
+    private Optional<String> validatedAlias(String value) {
+        String target = value.trim();
+        int propertySeparator = target.indexOf('?');
+        if (propertySeparator >= 0) {
+            target = target.substring(0, propertySeparator).trim();
+        }
         if (target.isBlank() || target.startsWith("(") || target.contains("/") || target.contains(":")) {
             return Optional.empty();
         }

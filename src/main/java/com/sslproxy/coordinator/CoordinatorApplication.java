@@ -48,21 +48,28 @@ public class CoordinatorApplication {
     public void onShutdown() {
         log.info("event=shutdown_start status=suspending_routes timeout_seconds=30");
 
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         try {
             // Suspend all routes first to stop message flow
             var routeController = camelContext.getRouteController();
             for (var route : camelContext.getRoutes()) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    break;
+                }
                 String routeId = route.getRouteId();
                 if (routeController.getRouteStatus(routeId).isStarted()) {
-                    routeController.suspendRoute(routeId, 30, TimeUnit.SECONDS);
+                    routeController.suspendRoute(routeId, remainingNanos, TimeUnit.NANOSECONDS);
                     log.info("event=route_suspend route={} status=suspended", routeId);
                 }
             }
 
-            // Stop Camel context with 30s timeout for in-flight exchanges
-            camelContext.getShutdownStrategy().setTimeUnit(TimeUnit.SECONDS);
-            camelContext.getShutdownStrategy().setTimeout(30);
-            log.info("event=shutdown status=stopping_camel timeout_seconds=30");
+            // Stop Camel context within the remainder of the shared shutdown budget.
+            long remainingNanos = Math.max(1L, deadlineNanos - System.nanoTime());
+            camelContext.getShutdownStrategy().setTimeUnit(TimeUnit.NANOSECONDS);
+            camelContext.getShutdownStrategy().setTimeout(remainingNanos);
+            log.info("event=shutdown status=stopping_camel timeout_millis={}",
+                    TimeUnit.NANOSECONDS.toMillis(remainingNanos));
             camelContext.shutdown();
 
             log.info("event=shutdown status=complete");
