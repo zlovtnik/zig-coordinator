@@ -191,18 +191,14 @@ public class AdaptivePullController {
             var status = routeController.getRouteStatus(routeId);
             boolean isSuspended = status != null && status.isSuspended();
 
-            config.setMaxPollRecords(maxPollRecords);
-
             if (isSuspended) {
-                routeStates.compute(routeId, (ignored, state) ->
-                        (state == null ? RouteState.initial(current) : state)
-                                .withApplied(maxPollRecords)
-                                .withSuspended(true));
-                log.info("event=adaptive_pull_endpoint status=adjusted_no_restart route={} "
-                                + "old_max_poll_records={} new_max_poll_records={} reason=route_suspended",
-                        routeId, current, maxPollRecords);
+                log.info("event=adaptive_pull_endpoint status=skipped_suspended route={} "
+                                + "reason=route_suspended_resume_will_apply",
+                        routeId);
                 return;
             }
+
+            config.setMaxPollRecords(maxPollRecords);
 
             log.info("event=adaptive_pull_endpoint status=adjusted route={} "
                             + "old_max_poll_records={} new_max_poll_records={}",

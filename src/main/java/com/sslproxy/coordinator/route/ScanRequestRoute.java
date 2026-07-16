@@ -70,7 +70,7 @@ public class ScanRequestRoute extends RouteBuilder {
                 + "?groupId={{coordinator.scan-consumer}}"
                 + "&autoOffsetReset=earliest"
                 + "&maxPollRecords={{coordinator.scan-fetch-count}}"
-                + "&consumersCount={{coordinator.scan-consumers-count}}"
+                + "&consumersCount=1"
                 + "&allowManualCommit=true"
                 + "&autoCommitEnable=false"
                 + "&breakOnFirstError=true")

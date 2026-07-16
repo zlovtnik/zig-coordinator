@@ -2,9 +2,6 @@ buildscript {
     repositories {
         mavenCentral()
     }
-    dependencies {
-        classpath("ch.epfl.scala:gradle-bloop_2.12:1.5.13")
-    }
 }
 
 plugins {
@@ -12,8 +9,6 @@ plugins {
     id("org.springframework.boot") version "3.4.4"
     id("io.spring.dependency-management") version "1.1.7"
 }
-
-apply(plugin = "bloop")
 
 group = "com.sslproxy"
 version = "0.1.0"

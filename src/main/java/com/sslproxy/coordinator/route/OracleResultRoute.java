@@ -64,7 +64,7 @@ public class OracleResultRoute extends RouteBuilder {
                 + "?groupId={{coordinator.result-consumer}}"
                 + "&autoOffsetReset=earliest"
                 + "&maxPollRecords={{coordinator.result-fetch-count}}"
-                + "&consumersCount={{coordinator.result-consumers-count}}"
+                + "&consumersCount=1"
                 + "&allowManualCommit=true"
                 + "&autoCommitEnable=false"
                 + "&breakOnFirstError=true")

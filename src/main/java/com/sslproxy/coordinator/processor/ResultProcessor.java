@@ -39,7 +39,6 @@ public class ResultProcessor implements Processor {
     public synchronized void process(Exchange exchange) {
         String resultJson = exchange.getIn().getBody(String.class);
         if (resultJson == null || resultJson.isEmpty()) {
-            KafkaBatchItem.commitExchange(exchange);
             return;
         }
 

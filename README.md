@@ -26,7 +26,7 @@ The coordinator is the central orchestrator for SSL proxy sync events. It:
 
 The coordinator is a **timer-driven loop** implemented as Apache Camel routes. The main loop ticks at the `coordinator.idle-sleep-ms` interval (default 250 ms) and sequences through these phases:
 
-```
+```text
 timer:coordinator-loop
   │
   ├─ direct:adaptivePull        Shrink Kafka fetch size when DB is behind
@@ -582,7 +582,7 @@ The test suite uses:
 
 ## Project Structure
 
-```
+```text
 services/zig-coordinator/
 ├── build.gradle.kts                   # Gradle build (Java 21, Spring Boot 3, Camel 4)
 ├── settings.gradle.kts                # Root project name: java-coordinator

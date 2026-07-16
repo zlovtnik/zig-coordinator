@@ -59,7 +59,6 @@ public class ScanRecordProcessor implements Processor {
     public synchronized void process(Exchange exchange) {
         String rawJson = exchange.getIn().getBody(String.class);
         if (rawJson == null || rawJson.isEmpty()) {
-            KafkaBatchItem.commitExchange(exchange);
             return;
         }
 

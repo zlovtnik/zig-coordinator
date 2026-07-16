@@ -147,7 +147,6 @@ public class CoordinatorRoute extends RouteBuilder {
                     .choice()
                         .when(simple("${body} == false"))
                             .log(LoggingLevel.TRACE, "event=batch_dispatch status=no_more_batches")
-                            .stop()
                         .endChoice()
                     .end()
                 .end();

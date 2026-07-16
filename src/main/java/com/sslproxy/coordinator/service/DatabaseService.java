@@ -107,7 +107,7 @@ public class DatabaseService {
                 () -> parseLongOrZero(observeDb("coordinator.pending_ledger_count", () -> jdbc.queryForObject(
                         "SELECT coordinator.pending_ledger_count()::text",
                         String.class
-                )), "coordinator.pending_ledger_count"),
+                ))),
                 "coordinator.pending_ledger_count"
         );
     }
@@ -131,7 +131,7 @@ public class DatabaseService {
                     props.scanRetryBackoffSeconds(),
                     props.ingestBatchSize()
             ));
-            return parseLongOrZero(result, "coordinator.process_ingest_ledger");
+            return parseLongOrZero(result);
         }, "coordinator.process_ingest_ledger");
     }
 
@@ -212,7 +212,7 @@ public class DatabaseService {
                     props.batchDispatchLeaseSeconds(),
                     props.batchMaxAttempts()
             ));
-            return parseIntOrZero(result, "coordinator.recover_stale_dispatched_batches");
+            return parseIntOrZero(result);
         }, "coordinator.recover_stale_dispatched_batches");
     }
 
@@ -530,7 +530,7 @@ public class DatabaseService {
     }
 
     private int queryForInt(Connection connection, String sql, Array... arrays) throws SQLException {
-        return parseIntOrZero(queryForSingleText(connection, sql, arrays), sql);
+        return parseIntOrZero(queryForSingleText(connection, sql, arrays));
     }
 
     private String queryForSingleText(Connection connection, String sql, Array... arrays) throws SQLException {
@@ -544,14 +544,14 @@ public class DatabaseService {
         }
     }
 
-    private int parseIntOrZero(String result, String operation) {
+    private int parseIntOrZero(String result) {
         if (result == null || result.isBlank()) {
             return 0;
         }
         return Integer.parseInt(result.trim());
     }
 
-    private long parseLongOrZero(String result, String operation) {
+    private long parseLongOrZero(String result) {
         if (result == null || result.isBlank()) {
             return 0L;
         }

@@ -182,20 +182,10 @@ public class JdbcOracleSink implements OracleSink {
     public long insertProxyEvents(String batchId, List<ProxyEventInsert> rows, List<BlockedEventInsert> blockedRows)
             throws Exception {
         return observeOracle("oracle.insert_proxy_events", () ->
-                withRetry("insert_proxy_events", 2, () -> {
-                    try {
-                        return withTransaction(connection ->
-                                insertProxyEventsTransaction(connection, batchId, rows, blockedRows));
-                    } catch (Exception e) {
-                        if (isProxyEventsBatchRowDuplicate(e.getMessage())) {
-                            return observeOracle("oracle.insert_proxy_events_retry", () ->
-                                    withTransaction(connection ->
-                                            insertProxyEventsTransaction(connection, batchId, rows, blockedRows)));
-                        }
-                        throw e;
-                    }
-                }
-        ));
+                withRetry("insert_proxy_events", 2, () ->
+                        withTransaction(connection ->
+                                insertProxyEventsTransaction(connection, batchId, rows, blockedRows))
+                ));
     }
 
     @Override
