@@ -43,6 +43,22 @@ class SqlFunctionContractTest {
     }
 
     @Test
+    void postgresBootstrapIncludesNormalizedWideTableCompanions() throws Exception {
+        String bootstrap = readSql("../../sql/postgres.sql");
+
+        assertTrue(bootstrap.contains("\\ir tables/032_vec_timing_profile_stats.sql"));
+        assertTrue(bootstrap.contains("\\ir tables/033_vec_behaviour_snapshot_stats.sql"));
+        assertTrue(bootstrap.contains("\\ir tables/034_vec_embedding_sources.sql"));
+        assertTrue(bootstrap.contains("\\ir tables/035_vec_embedding_job_leases.sql"));
+        assertTrue(bootstrap.contains("\\ir tables/036_vec_similarity_pair_meta.sql"));
+        assertTrue(bootstrap.contains("\\ir tables/037_wireless_frame_radio.sql"));
+        assertTrue(bootstrap.contains("\\ir tables/042_wireless_frame_security.sql"));
+        assertTrue(bootstrap.contains("\\ir views/000_wireless_frames_expanded.sql"));
+        assertTrue(bootstrap.contains("\\ir functions/012a_vec_upsert_embedding.sql"));
+        assertTrue(bootstrap.contains("\\ir functions/013a_vec_upsert_similarity_pair.sql"));
+    }
+
+    @Test
     void searchQueryAndFeedbackSchemaObjectsAreSplit() throws Exception {
         String bootstrap = readSql("../../sql/postgres.sql");
         assertTrue(bootstrap.contains("\\ir tables/028_search_queries.sql"));
@@ -167,14 +183,16 @@ class SqlFunctionContractTest {
 
     private void assertExpiredLeaseReleaseCapsAttempts(String sql) {
         int functionStart = sql.indexOf("create or replace function vec_release_expired_leases");
-        int terminalStatus = sql.indexOf("when attempts >= max_attempts then 'failed'", functionStart);
+        int exhaustedFlag = sql.indexOf("lease.attempts >= lease.max_attempts as exhausted", functionStart);
+        int terminalStatus = sql.indexOf("when selected.exhausted then 'failed'", exhaustedFlag);
         int retryStatus = sql.indexOf("else 'pending'", terminalStatus);
-        int terminalError = sql.indexOf("when attempts >= max_attempts then 'lease expired after max attempts'", retryStatus);
+        int terminalError = sql.indexOf("when selected.exhausted then 'lease expired after max attempts'", exhaustedFlag);
 
         assertTrue(functionStart >= 0, "expected expired lease release function");
+        assertTrue(exhaustedFlag > functionStart, "lease exhaustion must compare normalized lease counters");
         assertTrue(terminalStatus > functionStart, "expired terminal leases must become failed");
         assertTrue(retryStatus > terminalStatus, "expired retryable leases must return to pending");
-        assertTrue(terminalError > retryStatus, "terminal lease failures need an explicit error");
+        assertTrue(terminalError > exhaustedFlag, "terminal lease failures need an explicit error");
     }
 
     private void assertWirelessFramesSoftReference(String sql) {
@@ -192,8 +210,8 @@ class SqlFunctionContractTest {
     private void assertGraphEmbeddingFreshnessGuard(String sql) {
         int graphKeys = sql.indexOf("graph_keys as");
         int graphJobs = sql.indexOf("graph_jobs as", graphKeys);
-        int embeddingJoin = sql.indexOf("left join vec_embeddings existing", graphJobs);
-        int jobJoin = sql.indexOf("left join vec_embedding_jobs existing_job", embeddingJoin);
+        int embeddingJoin = sql.indexOf("left join vec_embeddings_expanded existing", graphJobs);
+        int jobJoin = sql.indexOf("left join vec_embedding_jobs_expanded existing_job", embeddingJoin);
         int freshnessGuard = sql.indexOf("keys.source_updated_at > coalesce(existing_job.completed_at, existing.embedded_at)", jobJoin);
 
         assertTrue(graphKeys > 0, "expected graph key freshness CTE");
@@ -208,7 +226,7 @@ class SqlFunctionContractTest {
         int cursorLoad = sql.indexOf("into v_event_cursor", functionStart);
         int cursorEventKeys = sql.indexOf("cursor_event_keys as", cursorLoad);
         int keySource = sql.indexOf("from sync_events e", cursorEventKeys);
-        int frameJoin = sql.indexOf("left join wireless_frames frame on frame.dedupe_key = e.dedupe_key", keySource);
+        int frameJoin = sql.indexOf("left join wireless_frames_expanded frame on frame.dedupe_key = e.dedupe_key", keySource);
         int effectiveTimestamp = sql.indexOf("greatest(e.updated_at, coalesce(frame.updated_at, e.updated_at)) as event_updated_at", cursorEventKeys);
         int cursorGuard = sql.indexOf("greatest(e.updated_at, coalesce(frame.updated_at, e.updated_at)) > v_event_cursor", frameJoin);
         int keyOrder = sql.indexOf("order by cursor_updated_at, e.dedupe_key", cursorGuard);
@@ -247,7 +265,7 @@ class SqlFunctionContractTest {
         int functionStart = sql.indexOf("create or replace function vec_enqueue_embedding_jobs");
         assertTrue(functionStart >= 0, "expected enqueue function");
 
-        int returningMarker = sql.indexOf("returning source_table, source_key, embedding_kind", functionStart);
+        int returningMarker = sql.indexOf("returning job_id, source_table, source_key, embedding_kind", functionStart);
         assertTrue(returningMarker > functionStart, "expected embedding insert returning marker");
 
         int insertedCount = sql.indexOf("(select count(*) from inserted)", returningMarker);
