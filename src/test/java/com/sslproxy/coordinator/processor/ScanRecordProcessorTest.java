@@ -6,8 +6,11 @@ import com.sslproxy.coordinator.fp.DbResult;
 import com.sslproxy.coordinator.service.DatabaseService;
 import org.apache.camel.Exchange;
 import org.apache.camel.Message;
+import org.apache.camel.component.kafka.KafkaConstants;
+import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -18,11 +21,31 @@ import static com.sslproxy.coordinator.testsupport.MockitoCaptors.scanRequestRec
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ScanRecordProcessorTest {
+
+    @Test
+    void commitsLastPollRecordOnlyAfterDurableBatchWrite() {
+        PayloadResolver payloadResolver = mock(PayloadResolver.class);
+        DatabaseService databaseService = mock(DatabaseService.class);
+        KafkaManualCommit manualCommit = mock(KafkaManualCommit.class);
+        when(payloadResolver.resolve(any(), any())).thenReturn("{}".getBytes(StandardCharsets.UTF_8));
+        when(databaseService.recordScanRequests(any())).thenReturn(new DbResult.Ok<>(1));
+        ScanRecordProcessor processor = new ScanRecordProcessor(
+                new ObjectMapper(), payloadResolver, databaseService, CoordinatorProperties.DEFAULTS);
+
+        processor.process(exchangeWithBodyAndCommit("""
+                {"stream_name":"wireless.audit","dedupe_key":"dedupe-1","payload_ref":"inline://json/e30","observed_at":"2026-06-01T12:00:00Z"}
+                """, manualCommit));
+
+        InOrder ordered = inOrder(databaseService, manualCommit);
+        ordered.verify(databaseService).recordScanRequests(any());
+        ordered.verify(manualCommit).commit();
+    }
 
     @Test
     void rejectsMissingObservedAtBeforeBatching() {
@@ -83,7 +106,8 @@ class ScanRecordProcessorTest {
                 {"stream_name":"wireless.audit","dedupe_key":"dedupe-1","payload_ref":"inline://json/e30","observed_at":"2026-06-01T12:00:00Z"}
                 """;
 
-        assertThrows(IllegalStateException.class, () -> processor.process(exchangeWithBody(payload)));
+        processor.process(exchangeWithBody(payload));
+        assertThrows(IllegalStateException.class, processor::flushPending);
         processor.flushPending();
 
         ArgumentCaptor<List<DatabaseService.ScanRequestRecord>> records = scanRequestRecordListCaptor();
@@ -97,6 +121,15 @@ class ScanRecordProcessorTest {
         Message message = mock(Message.class);
         when(exchange.getIn()).thenReturn(message);
         when(message.getBody(String.class)).thenReturn(body);
+        return exchange;
+    }
+
+    private Exchange exchangeWithBodyAndCommit(String body, KafkaManualCommit manualCommit) {
+        Exchange exchange = exchangeWithBody(body);
+        when(exchange.getIn().getHeader(KafkaConstants.MANUAL_COMMIT, KafkaManualCommit.class))
+                .thenReturn(manualCommit);
+        when(exchange.getIn().getHeader(KafkaConstants.LAST_POLL_RECORD, Boolean.class))
+                .thenReturn(true);
         return exchange;
     }
 

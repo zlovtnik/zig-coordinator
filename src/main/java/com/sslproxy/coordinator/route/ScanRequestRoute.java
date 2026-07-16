@@ -5,6 +5,8 @@ import com.sslproxy.coordinator.processor.ScanRecordProcessor;
 import org.apache.camel.Exchange;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.component.kafka.KafkaConstants;
+import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -41,13 +43,27 @@ public class ScanRequestRoute extends RouteBuilder {
 
     @Override
     public void configure() {
+        onException(IllegalStateException.class)
+                .onWhen(exchange -> fromRoute(exchange, "scan-request-consumer"))
+                .maximumRedeliveries(0)
+                .handled(false);
+
         onException(Exception.class)
+                .onWhen(exchange -> fromRoute(exchange, "scan-request-consumer"))
                 .maximumRedeliveries("{{coordinator.scan-route-max-retries:3}}")
                 .redeliveryDelay(500)
                 .useOriginalMessage()
                 .handled(true)
                 .process(exchange -> logRouteFailure(exchange, props.scanTopic() + ".dlq"))
-                .to("kafka:{{coordinator.scan-topic}}.dlq");
+                .to("kafka:{{coordinator.scan-topic}}.dlq")
+                .process(this::commitOffset);
+
+        onException(Exception.class)
+                .onWhen(exchange -> fromRoute(exchange, "scan-request-flush-timer"))
+                .maximumRedeliveries("{{coordinator.scan-route-max-retries:3}}")
+                .redeliveryDelay(500)
+                .handled(true)
+                .process(exchange -> logTimerFailure(exchange, "scan_request_flush"));
 
         // Consume from sync.scan.request with the zig-coordinator-scan consumer group
         from("kafka:{{coordinator.scan-topic}}"
@@ -55,6 +71,8 @@ public class ScanRequestRoute extends RouteBuilder {
                 + "&autoOffsetReset=earliest"
                 + "&maxPollRecords={{coordinator.scan-fetch-count}}"
                 + "&consumersCount={{coordinator.scan-consumers-count}}"
+                + "&allowManualCommit=true"
+                + "&autoCommitEnable=false"
                 + "&breakOnFirstError=true")
         .routeId("scan-request-consumer")
         .process(exchange -> {
@@ -87,6 +105,27 @@ public class ScanRequestRoute extends RouteBuilder {
                 .addKeyValue("dlq_topic", dlqTopic)
                 .addKeyValue("error", sanitize(error == null ? "" : error.getMessage()))
                 .log("scan request routed to DLQ");
+    }
+
+    private void logTimerFailure(Exchange exchange, String event) {
+        Exception error = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception.class);
+        log.atError()
+                .addKeyValue("event", event)
+                .addKeyValue("status", "failed")
+                .addKeyValue("error", sanitize(error == null ? "" : error.getMessage()))
+                .log("scan request timer flush failed; records remain buffered");
+    }
+
+    private boolean fromRoute(Exchange exchange, String routeId) {
+        return routeId.equals(exchange.getFromRouteId());
+    }
+
+    private void commitOffset(Exchange exchange) {
+        KafkaManualCommit manualCommit = exchange.getIn()
+                .getHeader(KafkaConstants.MANUAL_COMMIT, KafkaManualCommit.class);
+        if (manualCommit != null) {
+            manualCommit.commit();
+        }
     }
 
     private String sanitize(String message) {

@@ -160,7 +160,7 @@ public class OracleTransformService {
                         .or(() -> optionalLong(row, "attempt_count"))
                         .or(() -> nestedLong(row, "metrics", "attempt_count"))
                         .orElse(null),
-                verdict,
+                optionalString(row, "last_verdict").orElse(verdict),
                 nestedString(fingerprint, "tls_ver"),
                 nestedString(fingerprint, "alpn"),
                 nestedString(fingerprint, "ja3_lite"),

@@ -113,6 +113,27 @@ class RedpandaLagMetricsServiceTest {
     }
 
     @Test
+    void lagIsStaleBeforeFirstSuccessfulRefresh() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        MutableClock clock = new MutableClock(Instant.parse("2026-05-30T12:00:00Z"));
+        new RedpandaLagMetricsService(
+                registry,
+                coordinatorProperties(),
+                () -> {
+                    throw new IllegalStateException("not used");
+                },
+                clock
+        );
+
+        Gauge staleGauge = registry.find("coordinator.redpanda.lag.stale.seconds")
+                .tag("role", "scan")
+                .gauge();
+
+        assertNotNull(staleGauge);
+        assertTrue(staleGauge.value() > 0);
+    }
+
+    @Test
     void refreshFailureKeepsLastSuccessfulGaugeValueAndMarksStaleness() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         MutableClock clock = new MutableClock(Instant.parse("2026-05-30T12:00:00Z"));

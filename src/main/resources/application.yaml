@@ -164,8 +164,8 @@ management:
         include: ${MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE:health,info,metrics,hikaricp,prometheus}
   endpoint:
     health:
-      show-details: always
-      show-components: always
+      show-details: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:when-authorized}
+      show-components: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_COMPONENTS:when-authorized}
   metrics:
     tags:
       application: ${spring.application.name}

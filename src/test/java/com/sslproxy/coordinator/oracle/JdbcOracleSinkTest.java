@@ -9,6 +9,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTransientConnectionException;
 import java.time.OffsetDateTime;
 import java.time.Month;
 import java.util.List;
@@ -21,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -119,8 +121,64 @@ class JdbcOracleSinkTest {
         assertEquals(123_000_000, utc.getNano());
     }
 
+    @Test
+    void proxyEventLoadRetriesTransientConnectionFailure() throws Exception {
+        OracleConnectionFactory connectionFactory = mock(OracleConnectionFactory.class);
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        when(connectionFactory.getConnection())
+                .thenThrow(new SQLTransientConnectionException("connection reset"))
+                .thenReturn(connection);
+        when(connection.prepareStatement(anyString())).thenReturn(statement);
+        JdbcOracleSink sink = new JdbcOracleSink(
+                connectionFactory, props(true), new ObjectMapper(), ObservationRegistry.create());
+
+        assertEquals(0L, sink.insertProxyEvents("batch-1", List.of(), List.of()));
+
+        verify(connectionFactory, times(2)).getConnection();
+        verify(connection).commit();
+    }
+
+    @Test
+    void wirelessAuditUpsertsEveryDistinctSensor() throws Exception {
+        OracleConnectionFactory connectionFactory = mock(OracleConnectionFactory.class);
+        Connection connection = mock(Connection.class);
+        PreparedStatement sensorStatement = mock(PreparedStatement.class);
+        PreparedStatement frameStatement = mock(PreparedStatement.class);
+        when(connectionFactory.getConnection()).thenReturn(connection);
+        when(connection.prepareStatement(anyString())).thenAnswer(invocation ->
+                invocation.<String>getArgument(0).startsWith("BEGIN WIRELESS_UPSERT_SENSOR")
+                        ? sensorStatement
+                        : frameStatement);
+        when(frameStatement.executeUpdate()).thenReturn(1);
+        JdbcOracleSink sink = new JdbcOracleSink(
+                connectionFactory, props(true), new ObjectMapper(), ObservationRegistry.create());
+        OffsetDateTime first = OffsetDateTime.parse("2026-06-01T12:00:00Z");
+
+        long inserted = sink.insertWirelessAuditFrames("batch-1", List.of(
+                wirelessRow(1, "sensor-1", first.plusSeconds(1)),
+                wirelessRow(2, "sensor-2", first.plusSeconds(2)),
+                wirelessRow(3, "sensor-1", first)
+        ));
+
+        assertEquals(3L, inserted);
+        verify(sensorStatement, times(2)).execute();
+        verify(sensorStatement).setObject(1, "sensor-1");
+        verify(sensorStatement).setObject(1, "sensor-2");
+        verify(frameStatement, times(3)).executeUpdate();
+    }
+
     private JdbcOracleSink sink() {
         return sink(true);
+    }
+
+    private WirelessAuditFrameInsert wirelessRow(long sequence, String sensorId, OffsetDateTime observedAt) {
+        return new WirelessAuditFrameInsert(
+                sequence, "frame", observedAt, sensorId, "location-1", "wlan0", 1,
+                "management", "beacon", null, null, null, null, null, null, null,
+                null, null, 100, 0, 0, 0, 0, 0, 0, 0, 0,
+                null, null, null, null, null, "{}", "US"
+        );
     }
 
     private JdbcOracleSink sink(boolean wirelessEnabled) {

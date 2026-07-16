@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -99,10 +100,43 @@ public class JdbcOracleSink implements OracleSink {
                 : CORE_SCHEMA_OBJECTS;
         String placeholders = String.join(", ", Collections.nCopies(required.size(), "?"));
         String sql = """
-                select object_name, object_type, status
-                from all_objects
-                where object_name in (%s)
-                  and object_type in ('TABLE', 'PROCEDURE')
+                with candidates as (
+                    select sys_context('USERENV', 'CURRENT_SCHEMA') lookup_owner,
+                           object_name lookup_name,
+                           owner object_owner,
+                           object_name target_object_name,
+                           object_type,
+                           status,
+                           1 resolution_priority
+                    from all_objects
+                    where owner = sys_context('USERENV', 'CURRENT_SCHEMA')
+                      and object_type in ('TABLE', 'PROCEDURE')
+                    union all
+                    select synonym.owner lookup_owner,
+                           synonym.synonym_name lookup_name,
+                           target.owner object_owner,
+                           target.object_name target_object_name,
+                           target.object_type,
+                           target.status,
+                           case when synonym.owner = sys_context('USERENV', 'CURRENT_SCHEMA') then 2 else 3 end
+                    from all_synonyms synonym
+                    join all_objects target
+                      on target.owner = synonym.table_owner
+                     and target.object_name = synonym.table_name
+                     and target.object_type in ('TABLE', 'PROCEDURE')
+                    where synonym.owner in (sys_context('USERENV', 'CURRENT_SCHEMA'), 'PUBLIC')
+                ), ranked as (
+                    select candidates.*,
+                           row_number() over (
+                               partition by lookup_name, object_type
+                               order by resolution_priority, lookup_owner, object_owner, target_object_name
+                           ) resolution_rank
+                    from candidates
+                    where lookup_name in (%s)
+                )
+                select lookup_owner, lookup_name object_name, object_owner, target_object_name, object_type, status
+                from ranked
+                where resolution_rank = 1
                 """.formatted(placeholders);
 
         Map<OracleObjectRequirement, String> foundStatuses = new HashMap<>();
@@ -118,7 +152,7 @@ public class JdbcOracleSink implements OracleSink {
                             resultSet.getString("OBJECT_NAME"),
                             resultSet.getString("OBJECT_TYPE")
                     );
-                    foundStatuses.put(requirement, resultSet.getString("STATUS"));
+                    foundStatuses.putIfAbsent(requirement, resultSet.getString("STATUS"));
                 }
             }
         }
@@ -147,17 +181,21 @@ public class JdbcOracleSink implements OracleSink {
     @Override
     public long insertProxyEvents(String batchId, List<ProxyEventInsert> rows, List<BlockedEventInsert> blockedRows)
             throws Exception {
-        return observeOracle("oracle.insert_proxy_events", () -> {
-            try {
-                return withTransaction(connection -> insertProxyEventsTransaction(connection, batchId, rows, blockedRows));
-            } catch (Exception e) {
-                if (isProxyEventsBatchRowDuplicate(e.getMessage())) {
-                    return observeOracle("oracle.insert_proxy_events_retry",
-                            () -> withTransaction(connection -> insertProxyEventsTransaction(connection, batchId, rows, blockedRows)));
+        return observeOracle("oracle.insert_proxy_events", () ->
+                withRetry("insert_proxy_events", 2, () -> {
+                    try {
+                        return withTransaction(connection ->
+                                insertProxyEventsTransaction(connection, batchId, rows, blockedRows));
+                    } catch (Exception e) {
+                        if (isProxyEventsBatchRowDuplicate(e.getMessage())) {
+                            return observeOracle("oracle.insert_proxy_events_retry", () ->
+                                    withTransaction(connection ->
+                                            insertProxyEventsTransaction(connection, batchId, rows, blockedRows)));
+                        }
+                        throw e;
+                    }
                 }
-                throw e;
-            }
-        });
+        ));
     }
 
     @Override
@@ -205,13 +243,18 @@ public class JdbcOracleSink implements OracleSink {
                 if (rows.isEmpty()) {
                     return 0L;
                 }
-                WirelessAuditFrameInsert first = rows.stream()
-                        .min(java.util.Comparator.comparing(row -> row.observedAt()))
-                        .orElseThrow();
+                Map<String, WirelessAuditFrameInsert> sensors = new LinkedHashMap<>();
+                for (WirelessAuditFrameInsert row : rows) {
+                    sensors.merge(row.sensorId(), row, (existing, candidate) ->
+                            candidate.observedAt().isBefore(existing.observedAt()) ? candidate : existing);
+                }
                 try (PreparedStatement statement = prepare(connection,
                         "BEGIN WIRELESS_UPSERT_SENSOR(?, ?, ?, ?, ?); END;")) {
-                    bindAll(statement, first.sensorId(), first.locationId(), first.iface(), first.regDomain(), first.observedAt());
-                    statement.execute();
+                    for (WirelessAuditFrameInsert sensor : sensors.values()) {
+                        bindAll(statement, sensor.sensorId(), sensor.locationId(), sensor.iface(),
+                                sensor.regDomain(), sensor.observedAt());
+                        statement.execute();
+                    }
                 }
                 String sql = """
                         merge into WIRELESS_AUDIT_FRAMES tgt
@@ -667,7 +710,7 @@ public class JdbcOracleSink implements OracleSink {
                 return work.apply();
             } catch (Exception e) {
                 last = e;
-                if (OracleErrorClass.classify(e.getMessage()) == OracleErrorClass.PERMANENT) {
+                if (OracleErrorClass.classify(e) == OracleErrorClass.PERMANENT) {
                     throw e;
                 }
                 if (attempt < maxAttempts) {

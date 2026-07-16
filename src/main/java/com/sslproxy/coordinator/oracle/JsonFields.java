@@ -55,7 +55,7 @@ final class JsonFields {
 
     static java.util.Optional<Long> optionalLong(JsonNode row, String field) {
         JsonNode value = row.get(field);
-        if (value == null || value.isNull() || !value.isNumber()) {
+        if (value == null || value.isNull() || !value.isIntegralNumber() || !value.canConvertToLong()) {
             return java.util.Optional.empty();
         }
         return java.util.Optional.of(value.longValue());

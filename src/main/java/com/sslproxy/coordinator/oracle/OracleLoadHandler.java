@@ -59,17 +59,18 @@ public class OracleLoadHandler {
                     clock.nowRfc3339()
             );
         } catch (Exception e) {
-            OracleErrorClass errorClass = e instanceof IllegalArgumentException
-                    || e instanceof JsonProcessingException
-                    ? OracleErrorClass.PERMANENT
-                    : OracleErrorClass.classify(e.getMessage());
+            OracleErrorClass errorClass = e instanceof OraclePayloadReadException
+                    ? OracleErrorClass.RETRYABLE
+                    : e instanceof IllegalArgumentException || e instanceof JsonProcessingException
+                            ? OracleErrorClass.PERMANENT
+                            : OracleErrorClass.classify(e);
             log.error("event=oracle_load status=failed batch_id={} stream_name={} error_class={} error=\"{}\"",
                     load.batchId(), load.streamName(), errorClass.wireValue(), sanitize(e.getMessage()));
             return OracleResult.failure(load.jobId(), load.batchId(), errorClass, e.getMessage(), clock.nowRfc3339());
         }
     }
 
-    private OracleLoad repairPayloadRefIfNeeded(OracleLoad load) {
+    private OracleLoad repairPayloadRefIfNeeded(OracleLoad load) throws Exception {
         validateLoadMetadata(load);
         if (!load.payloadRef().isBlank()) {
             return load;
@@ -95,7 +96,10 @@ public class OracleLoadHandler {
             case DbResult.Err<String> err -> {
                 log.warn("event=oracle_load status=payload_ref_repair_failed batch_id={} operation={} error=\"{}\"",
                         load.batchId(), err.operation(), sanitize(err.cause().getMessage()));
-                yield load;
+                if (err.cause() instanceof Exception exception) {
+                    throw exception;
+                }
+                throw new IllegalStateException(err.operation(), err.cause());
             }
         };
     }

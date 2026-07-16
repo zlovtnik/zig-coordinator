@@ -69,19 +69,22 @@ public class BackpressureService {
      * @return the pending ledger count
      */
     public long checkAndAct() {
-        long pendingCount = switch (databaseService.pendingLedgerCount()) {
+        DbResult<Long> pendingResult = databaseService.pendingLedgerCount();
+        if (pendingResult instanceof DbResult.Err<?> err) {
+            log.atWarn()
+                    .addKeyValue("event", "backpressure")
+                    .addKeyValue("status", "pending_count_failed")
+                    .addKeyValue("operation", err.operation())
+                    .addKeyValue("error", sanitize(err.cause().getMessage()))
+                    .log("backpressure pending count failed");
+            metricsService.recordBackpressureActive(consumerSuspended);
+            return consumerSuspended ? budget() : 0L;
+        }
+
+        long pendingCount = switch (pendingResult) {
             case DbResult.Ok<Long> ok -> ok.value();
             case DbResult.Empty<Long> ignored -> 0L;
-            case DbResult.Err<Long> err -> {
-                log.atWarn()
-                        .addKeyValue("event", "backpressure")
-                        .addKeyValue("status", "pending_count_failed")
-                        .addKeyValue("operation", err.operation())
-                        .addKeyValue("error", sanitize(err.cause().getMessage()))
-                        .log("backpressure pending count failed");
-                metricsService.recordBackpressureActive(consumerSuspended);
-                yield 0L;
-            }
+            case DbResult.Err<Long> ignored -> throw new IllegalStateException("unreachable");
         };
         long budget = budget();
         long recoveryThreshold = recoveryThreshold();

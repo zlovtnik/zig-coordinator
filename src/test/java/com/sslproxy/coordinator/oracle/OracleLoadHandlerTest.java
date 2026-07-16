@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.sql.SQLTransientException;
 import java.util.Base64;
 import java.util.List;
 
@@ -36,6 +37,7 @@ class OracleLoadHandlerTest {
                   "blocked":true,
                   "category":"ads_tracker",
                   "verdict":"BLOCKED",
+                  "last_verdict":"ALLOWED",
                   "fingerprint":{"tls_ver":"1.3","alpn":"h2","ja3_lite":"abc"}
                 }]
                 """;
@@ -57,6 +59,8 @@ class OracleLoadHandlerTest {
         assertEquals(1, sink.proxyRows.size());
         assertEquals(1, sink.blockedRows.size());
         assertEquals(30L, sink.blockedRows.get(0).blockedBytes());
+        assertEquals("BLOCKED", sink.blockedRows.get(0).verdict());
+        assertEquals("ALLOWED", sink.blockedRows.get(0).lastVerdict());
         assertFalse(result.checksum().isBlank());
     }
 
@@ -143,6 +147,23 @@ class OracleLoadHandlerTest {
         assertEquals("payload_ref must not be empty", result.errorText());
         assertNull(sink.batchId);
         verify(databaseService).repairBatchPayloadRef("batch-1");
+    }
+
+    @Test
+    void preservesRetryablePayloadRepairFailure(@TempDir Path outbox) {
+        DatabaseService databaseService = mock(DatabaseService.class);
+        SQLTransientException failure = new SQLTransientException("database temporarily unavailable", "08006");
+        when(databaseService.repairBatchPayloadRef("batch-1"))
+                .thenReturn(new DbResult.Err<>("coordinator.repair_batch_payload_ref", failure));
+        OracleLoadHandler handler = handler(outbox, new FakeSink(), databaseService);
+
+        OracleResult result = handler.handle(new OracleLoad(
+                "job-1", "batch-1", 1, "proxy.events", "", "", "", 1
+        ));
+
+        assertEquals("failed", result.status());
+        assertEquals("retryable", result.errorClass());
+        assertEquals("database temporarily unavailable", result.errorText());
     }
 
     @Test

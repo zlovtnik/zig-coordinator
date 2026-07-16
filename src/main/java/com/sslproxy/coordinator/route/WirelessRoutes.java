@@ -89,7 +89,7 @@ public class WirelessRoutes extends RouteBuilder {
             String dedupeKey = extractField(payload, "dedupe_key");
             if (dedupeKey == null || dedupeKey.isEmpty()) {
                 log.warn("event=backlog_synced status=missing_dedupe_key");
-                return;
+                throw new IllegalArgumentException("backlog synced missing dedupe_key");
             }
             db.markBacklogSynced(dedupeKey).orElseThrow();
             log.info("event=backlog_synced status=ok dedupe_key={}", dedupeKey);
@@ -112,7 +112,7 @@ public class WirelessRoutes extends RouteBuilder {
                     String mac = extractField(payload, "mac");
                     if (mac == null || mac.isEmpty()) {
                         log.warn("event=mac_lookup status=missing_mac");
-                        return null;
+                        throw new IllegalArgumentException("mac lookup missing mac");
                     }
                     return db.lookupDeviceByMac(mac).orElse("null");
                 },

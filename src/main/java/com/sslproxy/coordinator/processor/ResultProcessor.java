@@ -27,7 +27,7 @@ public class ResultProcessor implements Processor {
 
     private final DatabaseService databaseService;
     private final CoordinatorProperties props;
-    private final BoundedAccumulator<String> accumulator;
+    private final BoundedAccumulator<KafkaBatchItem<String>> accumulator;
 
     public ResultProcessor(DatabaseService databaseService, CoordinatorProperties props) {
         this.databaseService = databaseService;
@@ -36,57 +36,68 @@ public class ResultProcessor implements Processor {
     }
 
     @Override
-    public void process(Exchange exchange) {
+    public synchronized void process(Exchange exchange) {
         String resultJson = exchange.getIn().getBody(String.class);
         if (resultJson == null || resultJson.isEmpty()) {
+            KafkaBatchItem.commitExchange(exchange);
             return;
         }
 
-        if (!accumulator.offer(resultJson)) {
+        if (!accumulator.offer(KafkaBatchItem.from(exchange, resultJson))) {
             log.error("event=batch_result_ingest status=rejected reason=accumulator_full "
                     + "pending_count={} max_pending={}", accumulator.size(), accumulator.capacity());
             throw new IllegalStateException("Pending result accumulator is full");
         }
 
-        flushPendingOrThrow();
+        if (accumulator.size() >= props.resultFetchCount() || KafkaBatchItem.isLastPollRecord(exchange)) {
+            flushPending(true);
+        }
     }
 
     /**
      * Flushes the accumulated result batch to the database.
      * Can be called externally on a timer to drain partial batches.
      */
-    public void flushPending() {
+    public synchronized void flushPending() {
         flushPending(false);
     }
 
-    private void flushPendingOrThrow() {
-        flushPending(true);
-    }
-
-    private void flushPending(boolean failOnError) {
-        List<String> batch = accumulator.drain(props.resultFetchCount());
+    private void flushPending(boolean fromConsumer) {
+        List<KafkaBatchItem<String>> batch = accumulator.drain(props.resultFetchCount());
         if (batch.isEmpty()) {
             return;
         }
+        if (!fromConsumer && batch.stream().anyMatch(KafkaBatchItem::requiresManualCommit)) {
+            accumulator.requeueFront(batch);
+            return;
+        }
+        List<String> records = batch.stream().map(KafkaBatchItem::value).toList();
 
-        switch (databaseService.processBatchResults(batch)) {
+        switch (databaseService.processBatchResults(records)) {
             case DbResult.Ok<Integer> ok ->
-                    log.info("event=batch_result_ingest status=processed count={} batch_size={}", ok.value(), batch.size());
+                    log.info("event=batch_result_ingest status=processed count={} batch_size={}", ok.value(), records.size());
             case DbResult.Empty<Integer> ignored ->
-                    log.info("event=batch_result_ingest status=processed count=0 batch_size={}", batch.size());
+                    log.info("event=batch_result_ingest status=processed count=0 batch_size={}", records.size());
             case DbResult.Err<Integer> err -> {
                 log.error("event=batch_result_ingest status=failed operation={} batch_size={} error=\"{}\"",
-                        err.operation(), batch.size(), sanitize(err.cause().getMessage()));
-                int dropped = accumulator.requeueFront(batch);
-                if (dropped > 0) {
+                        err.operation(), records.size(), sanitize(err.cause().getMessage()));
+                List<KafkaBatchItem<String>> rejected = fromConsumer ? List.of() : accumulator.requeueFront(batch);
+                if (!rejected.isEmpty()) {
                     log.error("event=batch_result_ingest status=dropped reason=accumulator_full "
                                     + "dropped_count={} pending_count={} max_pending={}",
-                            dropped, accumulator.size(), accumulator.capacity());
+                            rejected.size(), accumulator.size(), accumulator.capacity());
                 }
-                if (failOnError) {
-                    throw new IllegalStateException(err.operation(), err.cause());
-                }
+                throw new IllegalStateException(err.operation(), err.cause());
             }
+        }
+        commitBatch(batch);
+    }
+
+    private void commitBatch(List<KafkaBatchItem<String>> batch) {
+        try {
+            batch.forEach(KafkaBatchItem::commit);
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("Kafka offset commit failed after processing result batch", e);
         }
     }
 

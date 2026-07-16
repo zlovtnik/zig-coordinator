@@ -5,8 +5,22 @@ import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class DataSourceConfigTest {
+
+    @Test
+    void unsupportedSchemeErrorDoesNotExposeDatabaseUrl() {
+        String rawUrl = "mysql://user:secret@database.example/sync";
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> DataSourceConfig.normalizeDatabaseUrl(rawUrl));
+
+        assertEquals("Unsupported PostgreSQL URL scheme: mysql", error.getMessage());
+        assertFalse(error.getMessage().contains("secret"));
+        assertFalse(error.getMessage().contains("database.example"));
+    }
 
     @Test
     void leavesJdbcPostgresUrlUnchanged() {

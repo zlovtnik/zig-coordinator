@@ -42,7 +42,7 @@ public class ScanRecordProcessor implements Processor {
     private final PayloadResolver payloadResolver;
     private final DatabaseService databaseService;
     private final CoordinatorProperties props;
-    private final BoundedAccumulator<DatabaseService.ScanRequestRecord> accumulator;
+    private final BoundedAccumulator<KafkaBatchItem<DatabaseService.ScanRequestRecord>> accumulator;
 
     public ScanRecordProcessor(ObjectMapper objectMapper,
                                PayloadResolver payloadResolver,
@@ -56,9 +56,10 @@ public class ScanRecordProcessor implements Processor {
     }
 
     @Override
-    public void process(Exchange exchange) {
+    public synchronized void process(Exchange exchange) {
         String rawJson = exchange.getIn().getBody(String.class);
         if (rawJson == null || rawJson.isEmpty()) {
+            KafkaBatchItem.commitExchange(exchange);
             return;
         }
 
@@ -73,8 +74,8 @@ public class ScanRecordProcessor implements Processor {
             throw new IllegalArgumentException("scan request rejected", error);
         }
 
-        DatabaseService.ScanRequestRecord record = result.get();
-        if (!accumulator.offer(record)) {
+        KafkaBatchItem<DatabaseService.ScanRequestRecord> item = KafkaBatchItem.from(exchange, result.get());
+        if (!accumulator.offer(item)) {
             log.atError()
                     .addKeyValue("event", "scan_request_ingest")
                     .addKeyValue("status", "rejected")
@@ -84,7 +85,9 @@ public class ScanRecordProcessor implements Processor {
                     .log("scan request accumulator rejected record");
             throw new IllegalStateException("Pending scan request accumulator is full");
         }
-        flushPendingOrThrow();
+        if (accumulator.size() >= props.scanFetchCount() || KafkaBatchItem.isLastPollRecord(exchange)) {
+            flushPending(true);
+        }
 
     }
 
@@ -136,57 +139,67 @@ public class ScanRecordProcessor implements Processor {
      * Called automatically when batch size is reached, or can be called externally
      * on a timer to drain partial batches.
      */
-    public void flushPending() {
+    public synchronized void flushPending() {
         flushPending(false);
     }
 
-    private void flushPendingOrThrow() {
-        flushPending(true);
-    }
-
-    private void flushPending(boolean failOnError) {
-        List<DatabaseService.ScanRequestRecord> batch = accumulator.drain(props.scanFetchCount());
+    private void flushPending(boolean fromConsumer) {
+        List<KafkaBatchItem<DatabaseService.ScanRequestRecord>> batch = accumulator.drain(props.scanFetchCount());
         if (batch.isEmpty()) {
             return;
         }
+        if (!fromConsumer && batch.stream().anyMatch(KafkaBatchItem::requiresManualCommit)) {
+            accumulator.requeueFront(batch);
+            return;
+        }
+        List<DatabaseService.ScanRequestRecord> records = batch.stream().map(KafkaBatchItem::value).toList();
 
-        switch (databaseService.recordScanRequests(batch)) {
+        switch (databaseService.recordScanRequests(records)) {
             case DbResult.Ok<Integer> ok -> log.atInfo()
                     .addKeyValue("event", "scan_request_ingest")
                     .addKeyValue("status", "recorded")
                     .addKeyValue("count", ok.value())
-                    .addKeyValue("batch_size", batch.size())
+                    .addKeyValue("batch_size", records.size())
                     .log("scan request batch recorded");
             case DbResult.Empty<Integer> ignored -> log.atInfo()
                     .addKeyValue("event", "scan_request_ingest")
                     .addKeyValue("status", "recorded")
                     .addKeyValue("count", 0)
-                    .addKeyValue("batch_size", batch.size())
+                    .addKeyValue("batch_size", records.size())
                     .log("scan request batch recorded");
             case DbResult.Err<Integer> err -> {
                 log.atError()
                         .addKeyValue("event", "scan_request_ingest")
                         .addKeyValue("status", "failed")
                         .addKeyValue("operation", err.operation())
-                        .addKeyValue("batch_size", batch.size())
+                        .addKeyValue("batch_size", records.size())
                         .addKeyValue("error", sanitize(err.cause().getMessage()))
                         .addKeyValue("root_cause", rootCauseSummary(err.cause()))
                         .log("scan request batch failed");
-                int dropped = accumulator.requeueFront(batch);
-                if (dropped > 0) {
+                List<KafkaBatchItem<DatabaseService.ScanRequestRecord>> rejected = fromConsumer
+                        ? List.of()
+                        : accumulator.requeueFront(batch);
+                if (!rejected.isEmpty()) {
                     log.atError()
                             .addKeyValue("event", "scan_request_ingest")
                             .addKeyValue("status", "dropped")
                             .addKeyValue("reason", "accumulator_full")
-                            .addKeyValue("dropped_count", dropped)
+                            .addKeyValue("dropped_count", rejected.size())
                             .addKeyValue("pending_count", accumulator.size())
                             .addKeyValue("max_pending", accumulator.capacity())
                             .log("scan request retry records dropped");
                 }
-                if (failOnError) {
-                    throw new IllegalStateException(err.operation(), err.cause());
-                }
+                throw new IllegalStateException(err.operation(), err.cause());
             }
+        }
+        commitBatch(batch);
+    }
+
+    private void commitBatch(List<KafkaBatchItem<DatabaseService.ScanRequestRecord>> batch) {
+        try {
+            batch.forEach(KafkaBatchItem::commit);
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("Kafka offset commit failed after recording scan request batch", e);
         }
     }
 
