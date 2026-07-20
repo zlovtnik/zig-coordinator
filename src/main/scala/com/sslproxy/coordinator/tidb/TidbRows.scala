@@ -1,0 +1,260 @@
+package com.sslproxy.coordinator.tidb
+
+import java.time.OffsetDateTime
+
+/** Container for all insert row lists. Ported from OracleRowSet. */
+final case class TidbRowSet(
+    proxyEvents: List[ProxyEventInsert],
+    blockedEvents: List[BlockedEventInsert],
+    proxyPayloadAudit: List[ProxyPayloadAuditInsert],
+    wirelessAuditFrames: List[WirelessAuditFrameInsert],
+    wirelessBandwidth: List[WirelessBandwidthInsert],
+    wirelessRogueAp: List[WirelessRogueApInsert],
+    wirelessDeauthFlood: List[WirelessDeauthFloodInsert],
+    wirelessSignalAnomaly: List[WirelessSignalAnomalyInsert],
+    wirelessPmfAttack: List[WirelessPmfAttackInsert],
+    wirelessClientInventory: List[WirelessClientInventoryInsert],
+    wirelessProbeRequests: List[WirelessProbeRequestInsert]
+):
+  def inputRowCount(target: TidbSinkTarget): Int =
+    target match
+      case TidbSinkTarget.ProxyEvents             => proxyEvents.size
+      case TidbSinkTarget.ProxyPayloadAudit       => proxyPayloadAudit.size
+      case TidbSinkTarget.WirelessAuditFrames     => wirelessAuditFrames.size
+      case TidbSinkTarget.WirelessBandwidth       => wirelessBandwidth.size
+      case TidbSinkTarget.WirelessRogueAp         => wirelessRogueAp.size
+      case TidbSinkTarget.WirelessDeauthFlood     => wirelessDeauthFlood.size
+      case TidbSinkTarget.WirelessSignalAnomaly   => wirelessSignalAnomaly.size
+      case TidbSinkTarget.WirelessPmfAttack       => wirelessPmfAttack.size
+      case TidbSinkTarget.WirelessClientInventory => wirelessClientInventory.size
+      case TidbSinkTarget.WirelessProbeRequests   => wirelessProbeRequests.size
+
+object TidbRowSet:
+  val empty: TidbRowSet = TidbRowSet(
+    proxyEvents = Nil,
+    blockedEvents = Nil,
+    proxyPayloadAudit = Nil,
+    wirelessAuditFrames = Nil,
+    wirelessBandwidth = Nil,
+    wirelessRogueAp = Nil,
+    wirelessDeauthFlood = Nil,
+    wirelessSignalAnomaly = Nil,
+    wirelessPmfAttack = Nil,
+    wirelessClientInventory = Nil,
+    wirelessProbeRequests = Nil
+  )
+
+// ---------------------------------------------------------------------------
+// Insert record types — ported from OracleRows.java
+// ---------------------------------------------------------------------------
+
+final case class ProxyEventInsert(
+    eventTime: OffsetDateTime,
+    eventType: String,
+    host: String,
+    peerIp: Option[String],
+    wgPubkey: Option[String],
+    deviceId: Option[String],
+    identitySource: String,
+    peerHostname: Option[String],
+    clientUa: Option[String],
+    bytesUp: Long,
+    bytesDown: Long,
+    statusCode: Option[Long],
+    blocked: Long,
+    obfuscationProfile: Option[String],
+    correlationId: Option[String],
+    parentEventId: Option[String],
+    eventSequence: Option[Long],
+    durationMs: Option[Long],
+    reason: Option[String],
+    rawJson: Option[String]
+)
+
+final case class BlockedEventInsert(
+    rowSequence: Long,
+    host: String,
+    blockedBytes: Long,
+    frequencyHz: Option[Double],
+    riskScore: Option[Double],
+    category: Option[String],
+    verdict: String,
+    tarpitHeldMs: Long,
+    iatMs: Option[Long],
+    consecutiveBlocks: Option[Long],
+    lastVerdict: Option[String],
+    tlsVer: Option[String],
+    alpn: Option[String],
+    ja3Lite: Option[String],
+    resolvedIp: Option[String],
+    asnOrg: Option[String]
+)
+
+final case class ProxyPayloadAuditInsert(
+    correlationId: String,
+    host: String,
+    direction: String,
+    capturedAt: OffsetDateTime,
+    byteOffset: Long,
+    payloadObjectKey: Option[String],
+    contentType: Option[String],
+    httpMethod: Option[String],
+    httpStatus: Option[Long],
+    httpPath: Option[String],
+    isEncrypted: Long,
+    truncated: Long,
+    peerIp: Option[String],
+    notes: Option[String]
+)
+
+final case class WirelessAuditFrameInsert(
+    rowSequence: Long,
+    eventType: String,
+    observedAt: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    iface: String,
+    channel: Long,
+    frameType: Option[String],
+    frameSubtype: String,
+    bssid: Option[String],
+    sourceMac: Option[String],
+    destinationMac: Option[String],
+    transmitterMac: Option[String],
+    receiverMac: Option[String],
+    destinationBssid: Option[String],
+    ssid: Option[String],
+    signalDbm: Option[Long],
+    sequenceNumber: Option[Long],
+    rawLen: Long,
+    isRetry: Long,
+    isMoreData: Long,
+    isPowerSave: Long,
+    isProtected: Long,
+    isToDs: Long,
+    isFromDs: Long,
+    isHandshake: Long,
+    securityFlags: Long,
+    deviceId: Option[String],
+    username: Option[String],
+    identitySource: String,
+    tags: Option[String],
+    anomalyReasons: Option[String],
+    rawJson: Option[String],
+    regDomain: Option[String]
+)
+
+final case class WirelessBandwidthInsert(
+    rowSequence: Long,
+    schemaVersion: Long,
+    windowStart: OffsetDateTime,
+    windowEnd: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    iface: String,
+    channel: Long,
+    sourceMac: String,
+    destinationBssid: String,
+    ssid: Option[String],
+    bytes: Long,
+    frameCount: Long,
+    retryCount: Long,
+    moreDataCount: Long,
+    powerSaveCount: Long,
+    strongestSignalDbm: Option[Long],
+    histUnder100: Long,
+    hist100500: Long,
+    hist5001000: Long,
+    hist10001500: Long,
+    interArrivalP50Ms: Option[Long],
+    externalBssid: Long,
+    thresholdExceeded: Long,
+    wallClockDeltaMs: Option[Long],
+    windowIsPartial: Long,
+    publishedAt: Option[OffsetDateTime]
+)
+
+final case class WirelessRogueApInsert(
+    rowSequence: Long,
+    detectedAt: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    iface: String,
+    channel: Long,
+    rogueBssid: String,
+    ssid: Option[String],
+    signalDbm: Option[Long],
+    ssidImpersonation: Long,
+    rawJson: Option[String]
+)
+
+final case class WirelessDeauthFloodInsert(
+    rowSequence: Long,
+    detectedAt: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    iface: String,
+    channel: Long,
+    attackerMac: String,
+    targetBssid: String,
+    targetSsid: Option[String],
+    deauthCount: Long,
+    windowSecs: Long,
+    threshold: Long,
+    signalDbm: Option[Long],
+    rawJson: Option[String]
+)
+
+final case class WirelessSignalAnomalyInsert(
+    rowSequence: Long,
+    detectedAt: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    sourceMac: String,
+    bssid: String,
+    ssid: Option[String],
+    channel: Long,
+    baselineDbm: Long,
+    observedDbm: Long,
+    dbmDelta: Long,
+    configuredDelta: Long
+)
+
+final case class WirelessPmfAttackInsert(
+    rowSequence: Long,
+    detectedAt: OffsetDateTime,
+    sensorId: String,
+    locationId: String,
+    targetMac: String,
+    targetBssid: String,
+    ssid: Option[String],
+    channel: Option[Long],
+    attackTag: String,
+    reconnectWindowMs: Option[Long]
+)
+
+final case class WirelessClientInventoryInsert(
+    sensorId: String,
+    locationId: String,
+    snapshotAt: OffsetDateTime,
+    clientMac: String,
+    bssid: Option[String],
+    ssid: Option[String],
+    deviceId: Option[String],
+    username: Option[String],
+    identitySource: Option[String],
+    lastSeen: OffsetDateTime,
+    firstSeen: OffsetDateTime,
+    signalDbm: Option[Long],
+    isAuthorized: Long
+)
+
+final case class WirelessProbeRequestInsert(
+    rowSequence: Long,
+    clientMac: String,
+    ssid: String,
+    knownBssid: Option[String],
+    firstSeen: OffsetDateTime,
+    lastSeen: OffsetDateTime,
+    probeCount: Long
+)
