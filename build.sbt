@@ -53,6 +53,7 @@ val mysqlJdbcVersion = "9.2.0"
 val hikariCpVersion = "6.2.1"
 val log4CatsVersion = "2.8.0"
 val slf4jVersion = "2.0.18"
+val pureconfigVersion = "0.17.8"
 val micrometerVersion = "1.13.2"
 val testcontainersVersion = "1.20.6"
 
@@ -68,6 +69,7 @@ lazy val root = (project in file("."))
       "org.tpolecat" %% "doobie-hikari" % doobieVersion,
       "com.monovore" %% "decline" % declineVersion,
       "com.monovore" %% "decline-effect" % declineVersion,
+      "com.github.pureconfig" %% "pureconfig-core" % pureconfigVersion,
       "io.circe" %% "circe-core" % circeVersion,
       "io.circe" %% "circe-generic" % circeVersion,
       "io.circe" %% "circe-parser" % circeVersion,
