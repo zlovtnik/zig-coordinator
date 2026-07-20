@@ -1,9 +1,10 @@
 package com.sslproxy.coordinator.tidb
 
 import cats.effect.IO
+import com.sslproxy.coordinator.config.TiDbConfig
 import org.slf4j.LoggerFactory
 
-class TidbSchemaPreflight(transactor: TidbTransactor, config: TidbConfig):
+class TidbSchemaPreflight(transactor: TidbTransactor, config: TiDbConfig):
   import TidbSchemaPreflight.log
 
   private val allRequiredTables: List[String] = List(

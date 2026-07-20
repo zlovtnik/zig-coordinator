@@ -31,7 +31,7 @@ mysql -h 127.0.0.1 -P 4000 -u root -e "USE coordinator; SHOW TABLES;"
 
 ### Coordinator JDBC URL
 
-```
+```text
 jdbc:mysql://127.0.0.1:4000/coordinator?rewriteBatchedStatements=true&useSSL=false&allowPublicKeyRetrieval=true
 ```
 

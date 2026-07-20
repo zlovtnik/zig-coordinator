@@ -57,12 +57,12 @@ final case class HttpConfig(
 
 object HttpConfig:
   given ConfigReader[HttpConfig] =
-    ConfigReader.forProduct1("port") { port =>
+    ConfigReader[Int].emap { port =>
       if port < 0 || port > 65535 then
-        throw new IllegalArgumentException(
-          s"Invalid COORDINATOR_HTTP_PORT: $port — must be between 0 and 65535"
-        )
-      HttpConfig(port)
+        Left(pureconfig.error.CannotConvert(port.toString, "Int",
+          s"Port must be between 0 and 65535, got $port"))
+      else
+        Right(HttpConfig(port))
     }
 
 final case class SyncConfig(

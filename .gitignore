@@ -21,7 +21,8 @@ yarn.lock
 pnpm-lock.yaml
 .gradle/
 bin/
-project/
+project/project/
+project/target/
 target/
 # Python
 __pycache__/

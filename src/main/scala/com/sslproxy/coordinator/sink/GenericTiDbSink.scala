@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.sink
 
 import cats.effect.IO
+import com.sslproxy.coordinator.tidb.TidbErrorClass
 import doobie.*
 import doobie.implicits.*
 import doobie.free.connection.raw
@@ -54,7 +55,10 @@ class GenericTiDbSink(xa: Transactor[IO]):
       else s"${c.quotedName} = VALUES(${c.quotedName})"
     }.filter(_.nonEmpty).mkString(", ")
 
-    s"INSERT INTO ${tableMeta.quotedTable} ($colNames) VALUES ($placeholders) ON DUPLICATE KEY UPDATE $updates"
+    if updates.isEmpty then
+      s"INSERT INTO ${tableMeta.quotedTable} ($colNames) VALUES ($placeholders)"
+    else
+      s"INSERT INTO ${tableMeta.quotedTable} ($colNames) VALUES ($placeholders) ON DUPLICATE KEY UPDATE $updates"
 
   private def setColValue(ps: PreparedStatement, idx: Int, value: ColValue): Unit =
     value match
@@ -67,17 +71,7 @@ class GenericTiDbSink(xa: Transactor[IO]):
       case ColValue.VJson(j)     => ps.setString(idx, j)
 
   private def isRetryable(t: Throwable): Boolean =
-    val msg = Option(t.getMessage).getOrElse("").toLowerCase(java.util.Locale.ROOT)
-    val sqlState = t match
-      case se: java.sql.SQLException => Option(se.getSQLState)
-      case _ => None
-
-    sqlState.exists(s => s.startsWith("08") || s.startsWith("40")) ||
-    msg.contains("timeout") ||
-    msg.contains("deadlock") ||
-    msg.contains("write conflict") ||
-    msg.contains("lock wait") ||
-    msg.contains("region unavailable")
+    TidbErrorClass.classify(t) == TidbErrorClass.Retryable
 
   private def sanitize(msg: String): String =
     if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')

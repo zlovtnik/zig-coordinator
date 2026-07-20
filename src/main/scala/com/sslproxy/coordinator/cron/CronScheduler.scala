@@ -49,7 +49,6 @@ class CronScheduler(
 
   val schemaRefresher: Stream[IO, Unit] =
     schemaIntrospector.startRefresher(knownTables)
-  )
 
   private def processIngest(): IO[Unit] =
     sql"""SELECT COUNT(*) FROM proxy_events WHERE 1=1"""

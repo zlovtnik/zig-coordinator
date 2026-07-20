@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.tidb
 
 import cats.effect.{IO, Resource}
+import com.sslproxy.coordinator.config.TiDbConfig
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.circe.Json
 import org.slf4j.LoggerFactory
@@ -9,7 +10,7 @@ import java.sql.{Connection, PreparedStatement, Timestamp, Types}
 import java.time.{Instant, OffsetDateTime}
 import scala.concurrent.duration.*
 
-final class TidbTransactor private (ds: HikariDataSource, config: TidbConfig) extends TidbSink:
+final class TidbTransactor private (ds: HikariDataSource, config: TiDbConfig) extends TidbSink:
   import TidbTransactor.log
 
   private val batchSize: Int = 500
@@ -547,7 +548,8 @@ final class TidbTransactor private (ds: HikariDataSource, config: TidbConfig) ex
     }
 
   def preflightCheck(requiredTables: List[String]): IO[List[String]] =
-    withConnection { conn =>
+    if requiredTables.isEmpty then IO.pure(List.empty)
+    else withConnection { conn =>
       val placeholders = requiredTables.map(_ => "?").mkString(", ")
       val sql = s"""
         SELECT TABLE_NAME
@@ -584,13 +586,16 @@ final class TidbTransactor private (ds: HikariDataSource, config: TidbConfig) ex
 object TidbTransactor:
   private val log = LoggerFactory.getLogger(getClass)
 
-  def resource(config: TidbConfig): Resource[IO, TidbTransactor] =
+  def resource(config: TiDbConfig): Resource[IO, TidbTransactor] =
     Resource.make(allocate(config))(_.close())
 
-  private def allocate(config: TidbConfig): IO[TidbTransactor] =
+  def fromDataSource(ds: HikariDataSource, config: TiDbConfig): TidbTransactor =
+    new TidbTransactor(ds, config)
+
+  private def allocate(config: TiDbConfig): IO[TidbTransactor] =
     IO.blocking {
       val hikariConfig = new HikariConfig()
-      hikariConfig.setJdbcUrl(TidbConfig.jdbcUrl(config))
+      hikariConfig.setJdbcUrl(jdbcUrl(config))
       hikariConfig.setUsername(config.user)
       hikariConfig.setPassword(config.password)
       hikariConfig.setMaximumPoolSize(config.poolSize)
@@ -608,3 +613,9 @@ object TidbTransactor:
         config.host, config.port, config.database)
       new TidbTransactor(ds, config)
     }
+
+  def jdbcUrl(config: TiDbConfig): String =
+    val base = s"jdbc:mysql://${config.host}:${config.port}/${config.database}?rewriteBatchedStatements=true"
+    config.sslMode match
+      case "DISABLED" => s"$base&useSSL=false&allowPublicKeyRetrieval=true"
+      case mode       => s"$base&sslMode=$mode"

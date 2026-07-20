@@ -5,11 +5,12 @@ import cats.syntax.all.*
 import com.comcast.ip4s.*
 import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.cron.CronScheduler
-import com.sslproxy.coordinator.db.DoobieTransactor
 import com.sslproxy.coordinator.http.HealthRoutes
 import com.sslproxy.coordinator.kafka.{ConsumerStream, KafkaComponents, TidbLoadStream}
 import com.sslproxy.coordinator.sink.*
 import com.sslproxy.coordinator.tidb.*
+import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
+import doobie.Transactor
 import fs2.kafka.*
 import org.http4s.ember.server.EmberServerBuilder
 import org.slf4j.LoggerFactory
@@ -19,21 +20,13 @@ import scala.concurrent.duration.*
 object Main extends IOApp.Simple:
   private val log = LoggerFactory.getLogger(getClass)
 
-  private def toOldTidbConfig(c: com.sslproxy.coordinator.config.TiDbConfig): TidbConfig =
-    TidbConfig(
-      host = c.host, port = c.port, database = c.database, user = c.user,
-      password = c.password, poolSize = c.poolSize,
-      connectionTimeoutMs = c.connectionTimeoutMs,
-      statementTimeoutSecs = c.statementTimeoutSecs,
-      enabled = c.enabled, warnOnly = c.warnOnly, sslMode = c.sslMode
-    )
-
-  private def toOldKafkaConfig(c: com.sslproxy.coordinator.config.KafkaCfg): com.sslproxy.coordinator.config.KafkaConfig =
-    com.sslproxy.coordinator.config.KafkaConfig(
-      bootstrapServers = c.bootstrapServers, loadTopic = c.loadTopic,
-      resultTopic = c.resultTopic, dlqSuffix = c.dlqSuffix,
-      consumerGroup = c.consumerGroup, maxPollRecords = c.maxPollRecords,
-      pollTimeoutMs = c.pollTimeoutMs
+  private val blockingEc: scala.concurrent.ExecutionContext =
+    scala.concurrent.ExecutionContext.fromExecutor(
+      java.util.concurrent.Executors.newCachedThreadPool { r =>
+        val t = new Thread(r, "doobie-tidb-pool")
+        t.setDaemon(true)
+        t
+      }
     )
 
   override def run: IO[Unit] =
@@ -43,56 +36,79 @@ object Main extends IOApp.Simple:
       log.warn("event=startup status=disabled tidb_sink=disabled")
       IO.println("TiDB sink disabled (set TIDB_ENABLED=true to enable)").void
     else
-      val oldTiDbCfg = toOldTidbConfig(cfg.tidb)
-      val oldKafkaCfg = toOldKafkaConfig(cfg.kafka)
-
-      val transactorResource: Resource[IO, (TidbTransactor, doobie.hikari.HikariTransactor[IO])] =
-        for
-          oldTx <- TidbTransactor.resource(oldTiDbCfg)
-          newTx <- DoobieTransactor.resource(cfg.tidb)
-        yield (oldTx, newTx)
+      val poolResource: Resource[IO, HikariDataSource] =
+        Resource.make(
+          IO.blocking {
+            val hc = new HikariConfig()
+            hc.setJdbcUrl(TidbTransactor.jdbcUrl(cfg.tidb))
+            hc.setUsername(cfg.tidb.user)
+            hc.setPassword(cfg.tidb.password)
+            hc.setMaximumPoolSize(cfg.tidb.poolSize)
+            hc.setConnectionTimeout(cfg.tidb.connectionTimeoutMs)
+            hc.setDriverClassName("com.mysql.cj.jdbc.Driver")
+            hc.setPoolName("tidb-pool")
+            hc.setAutoCommit(true)
+            hc.setConnectionTestQuery("SELECT 1")
+            hc.addDataSourceProperty("cachePrepStmts", "true")
+            hc.addDataSourceProperty("prepStmtCacheSize", "250")
+            hc.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
+            val ds = new HikariDataSource(hc)
+            log.info("TiDB pool allocated to {}:{}/{}",
+              cfg.tidb.host, cfg.tidb.port, cfg.tidb.database)
+            ds
+          }
+        ) { ds => IO.blocking(ds.close()) }
 
       val appResource: Resource[IO, Unit] =
-        transactorResource.flatMap { case (oldTx, newTx) =>
-          val preflight = new TidbSchemaPreflight(oldTx, oldTiDbCfg)
-          val startChecks = Resource.eval(preflight.validate())
+        poolResource.flatMap { ds =>
+          val oldTx = TidbTransactor.fromDataSource(ds, cfg.tidb)
+          val newTx = Transactor.fromDataSource[IO](ds, blockingEc)
+          val preflight = new TidbSchemaPreflight(oldTx, cfg.tidb)
 
-          startChecks.flatMap { _ =>
-            KafkaComponents.resource(oldKafkaCfg).flatMap { kafka =>
-              val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
-              val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
+          Resource.eval(preflight.validate()).flatMap { _ =>
+            KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
+              Resource.eval(SchemaIntrospector(newTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
+                val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
+                val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
 
-              val genericSink = new GenericTiDbSink(newTx)
-              val schemaIntrospector = new SchemaIntrospector(newTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)
-              val registry = new SystemRegistry(cfg.systemRegistry)
+                val genericSink = new GenericTiDbSink(newTx)
+                val registry = new SystemRegistry(cfg.systemRegistry)
 
-              val sinkPipe = new SinkPipe(genericSink, schemaIntrospector, registry, dl =>
-                val dlqTopic = cfg.kafka.loadTopic + cfg.kafka.dlqSuffix
-                val record = ProducerRecord(dlqTopic, dl.table, dl.toDlqJson)
-                kafka.producer.produce(ProducerRecords.one(record)).flatten.void
-              )
+                val sinkPipe = new SinkPipe(genericSink, schemaIntrospector, registry, dl =>
+                  val dlqTopic = cfg.kafka.loadTopic + cfg.kafka.dlqSuffix
+                  val record = ProducerRecord(dlqTopic, dl.table, dl.toDlqJson)
+                  kafka.producer.produce(ProducerRecords.one(record)).flatten.void
+                )
 
-              val cronScheduler = new CronScheduler(cfg.cron, newTx, schemaIntrospector)
+                val cronScheduler = new CronScheduler(cfg.cron, newTx, schemaIntrospector)
 
-              val healthRoutes = new HealthRoutes(oldTx)
+                val healthRoutes = new HealthRoutes(oldTx)
 
-              val httpPort = Port.fromInt(cfg.http.port).getOrElse(
-                sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")
-              )
-              val serverResource = EmberServerBuilder.default[IO]
-                .withPort(httpPort)
-                .withHost(host"0.0.0.0")
-                .withHttpApp(healthRoutes.routes.orNotFound)
-                .build
+                val httpPort = Port.fromInt(cfg.http.port).getOrElse(
+                  sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")
+                )
+                val serverResource = EmberServerBuilder.default[IO]
+                  .withPort(httpPort)
+                  .withHost(host"0.0.0.0")
+                  .withHttpApp(healthRoutes.routes.orNotFound)
+                  .build
 
-              serverResource.flatMap { _ =>
-                val streams =
-                  TidbLoadStream.run(kafka, handler)
-                    .merge(ConsumerStream.run(cfg.kafka, sinkPipe, kafka.producer))
-                    .merge(cronScheduler.mainLoop)
-                    .merge(cronScheduler.schemaRefresher)
+                serverResource.flatMap { _ =>
+                  val streams =
+                    TidbLoadStream.run(kafka, handler)
+                      .merge(ConsumerStream.run(cfg.kafka, sinkPipe, kafka.producer))
+                      .merge(cronScheduler.mainLoop)
+                      .merge(cronScheduler.schemaRefresher)
 
-                Resource.make(streams.compile.drain.start)(_.cancel).void
+                  Resource.make(streams.compile.drain.start.flatMap { fiber =>
+                    fiber.join.flatMap {
+                      case outcome if !outcome.isSuccess =>
+                        log.error("event=stream_fatal status=failed outcome={}", outcome)
+                        IO.raiseError(RuntimeException("Background stream terminated unexpectedly"))
+                      case _ => IO.unit
+                    }.start.as(fiber)
+                  })(_.cancel).void
+                }
               }
             }
           }

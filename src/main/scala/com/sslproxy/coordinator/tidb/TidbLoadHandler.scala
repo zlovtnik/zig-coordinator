@@ -31,11 +31,7 @@ class TidbLoadHandler(
           else
             TidbResult.success(resolved.jobId, resolved.batchId, rowCount.toInt, checksum, finishedAt)
     yield finalResult).handleError { err =>
-      val errorClass = err match
-        case _: TidbPayloadReadException => TidbErrorClass.Retryable
-        case _: IllegalArgumentException => TidbErrorClass.Permanent
-        case _: io.circe.ParsingFailure  => TidbErrorClass.Permanent
-        case _                           => TidbErrorClass.classify(err)
+      val errorClass = classifyError(err)
       log.error("event=tidb_load status=failed batch_id={} stream_name={} error_class={} error=\"{}\"",
         load.batchId, load.streamName, errorClass.wireValue, sanitize(err.getMessage))
       TidbResult.failure(load.jobId, load.batchId, errorClass, err.getMessage, finishedAt)
@@ -85,22 +81,18 @@ class TidbLoadHandler(
       }
 
   private def buildFailureResult(load: TidbLoad, err: Throwable): TidbResult =
-    val errorClass = err match
-      case _: TidbPayloadReadException => TidbErrorClass.Retryable
-      case _: IllegalArgumentException => TidbErrorClass.Permanent
-      case _                           => TidbErrorClass.classify(err)
-    TidbResult.failure(load.jobId, load.batchId, errorClass, err.getMessage, clock.nowRfc3339)
+    TidbResult.failure(load.jobId, load.batchId, classifyError(err), err.getMessage, clock.nowRfc3339)
 
   private def repairPayloadRefIfNeeded(load: TidbLoad): IO[TidbLoad] =
-    validateLoadMetadata(load)
-    if load.payloadRef.nonEmpty then IO.pure(load)
-    else IO.raiseError(IllegalArgumentException("payload_ref must not be empty (repair from database not available in standalone TiDB sink)"))
+    IO(validateLoadMetadata(load)) *>
+      (if load.payloadRef.nonEmpty then IO.pure(load)
+       else IO.raiseError(IllegalArgumentException("payload_ref must not be empty (repair from database not available in standalone TiDB sink)")))
 
   private def validateLoad(load: TidbLoad): IO[Unit] =
-    validateLoadMetadata(load)
-    if load.payloadRef.isBlank then
-      IO.raiseError(IllegalArgumentException("payload_ref must not be empty"))
-    else IO.unit
+    IO(validateLoadMetadata(load)) *>
+      (if load.payloadRef.isBlank then
+         IO.raiseError(IllegalArgumentException("payload_ref must not be empty"))
+       else IO.unit)
 
   private def validateLoadMetadata(load: TidbLoad): Unit =
     if load.jobId.isBlank then
@@ -109,6 +101,13 @@ class TidbLoadHandler(
       throw IllegalArgumentException("batch_id must not be empty")
     if load.streamName.isBlank then
       throw IllegalArgumentException("stream_name must not be empty")
+
+  private def classifyError(err: Throwable): TidbErrorClass =
+    err match
+      case _: TidbPayloadReadException => TidbErrorClass.Retryable
+      case _: IllegalArgumentException => TidbErrorClass.Permanent
+      case _: io.circe.ParsingFailure  => TidbErrorClass.Permanent
+      case _                           => TidbErrorClass.classify(err)
 
   private def sanitize(msg: String): String =
     if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')

@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
-import com.sslproxy.coordinator.config.KafkaConfig
+import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.tidb.{TidbLoadHandler, TidbResult}
 import fs2.Stream
 import fs2.kafka.*
@@ -43,12 +43,12 @@ object TidbLoadStream:
             }.as(committable.offset)
           }
       }
-      .parJoin(1)
+      .parJoinUnbounded
       .through(commitBatch(cfg.pollTimeoutMs))
 
   private def produceResult(
       components: KafkaComponents,
-      cfg: KafkaConfig,
+      cfg: KafkaCfg,
       result: TidbResult
   ): IO[Unit] =
     val record = ProducerRecord(cfg.resultTopic, result.jobId, result.asJson.noSpaces)
@@ -56,7 +56,7 @@ object TidbLoadStream:
 
   private def produceDlq(
       components: KafkaComponents,
-      cfg: KafkaConfig,
+      cfg: KafkaCfg,
       record: ConsumerRecord[String, String],
       err: Throwable
   ): IO[Unit] =

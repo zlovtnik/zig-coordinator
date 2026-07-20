@@ -136,4 +136,3 @@ object JsonFields:
 
   private def parseTimestamp(value: String): Option[OffsetDateTime] =
     Try(OffsetDateTime.parse(value, timestampParser)).toOption
-      .orElse(Try(OffsetDateTime.parse(value)).toOption)

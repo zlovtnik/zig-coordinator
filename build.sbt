@@ -92,7 +92,7 @@ lazy val root = (project in file("."))
     Test / unmanagedSources / excludeFilter := "*.java",
     scalacOptions ++= Seq(
       "-Yfuture-lazy-vals",
-      "-java-output-version:21",
+      "-release:21",
       "-deprecation",
       "-Wvalue-discard",
       "-Wunused:all",

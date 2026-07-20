@@ -13,12 +13,11 @@ object TidbErrorClass:
     if failure == null then return Permanent
 
     val failures = mutable.ArrayDeque[Throwable](failure)
-    val visited = mutable.Set.empty[Int]
+    val visited = mutable.Set.empty[Throwable]
 
     while failures.nonEmpty do
       val current = failures.removeHead()
-      val identity = System.identityHashCode(current)
-      if !visited.add(identity) then ()
+      if !visited.add(current) then ()
       else
         current match
           case _: SQLRecoverableException | _: SQLTransientException =>

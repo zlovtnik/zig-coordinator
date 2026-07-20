@@ -35,20 +35,20 @@ class TidbPayloadResolver(syncOutboxDir: String):
       case TidbSinkTarget.WirelessClientInventory =>
         val clients = value.hcursor.downField("clients").focus
           .getOrElse(throw new IllegalArgumentException("wireless client inventory payload must contain a clients array"))
-        clients.asArray.getOrElse(
+        val arr = clients.asArray.getOrElse(
           throw new IllegalArgumentException("wireless client inventory: 'clients' must be an array")
         )
-        mergeClientInventory(value, clients)
+        mergeClientInventory(value, arr)
       case _ =>
         value.asArray.getOrElse(Vector(value)).toList
 
   /** Merges parent-level sensor_id/location_id/snapshot_at into each client object. */
-  private def mergeClientInventory(payload: Json, clients: Json): List[Json] =
+  private def mergeClientInventory(payload: Json, clients: Vector[Json]): List[Json] =
     val sensorId = payload.hcursor.downField("sensor_id").focus
     val locationId = payload.hcursor.downField("location_id").focus
     val snapshotAt = payload.hcursor.downField("snapshot_at").focus
       .orElse(payload.hcursor.downField("observed_at").focus)
-    clients.asArray.getOrElse(Vector.empty).toList.map { client =>
+    clients.toList.map { client =>
       val obj = client.asObject.getOrElse(
         throw new IllegalArgumentException("wireless client inventory: each client must be a JSON object")
       )

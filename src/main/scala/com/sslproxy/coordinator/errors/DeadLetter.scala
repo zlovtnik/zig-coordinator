@@ -22,7 +22,7 @@ final case class DeadLetter(
       "table" -> Json.fromString(table),
       "origin" -> Json.fromString(ctx.origin),
       "destination" -> Json.fromString(ctx.destination),
-      "error" -> Json.fromString(error),
+      "error" -> Json.fromString(Option(error).getOrElse("")),
       "timestamp" -> Json.fromString(timestamp.toString),
       "row" -> rowFields
     ).noSpaces

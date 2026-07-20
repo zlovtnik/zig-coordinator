@@ -9,11 +9,8 @@ import org.slf4j.LoggerFactory
 
 import scala.concurrent.duration.*
 
-final class SchemaIntrospector(xa: Transactor[IO], database: String, refreshInterval: FiniteDuration):
+final class SchemaIntrospector private (xa: Transactor[IO], database: String, refreshInterval: FiniteDuration, metaCache: Ref[IO, Map[String, TableMeta]]):
   import SchemaIntrospector.log
-
-  private val metaCache: Ref[IO, Map[String, TableMeta]] =
-    Ref.unsafe[IO, Map[String, TableMeta]](Map.empty)
 
   def loadTableMeta(tableName: String): IO[TableMeta] =
     val sql =
@@ -45,12 +42,12 @@ final class SchemaIntrospector(xa: Transactor[IO], database: String, refreshInte
   def loadAll(tableNames: List[String]): IO[Map[String, TableMeta]] =
     tableNames
       .traverse { name =>
-        loadTableMeta(name).map(m => name -> m).handleError { err =>
+        loadTableMeta(name).map(m => Some(name -> m)).handleError { err =>
           log.error("event=schema_introspect status=failed table={} error=\"{}\"", name, sanitize(err.getMessage))
-          name -> TableMeta(name, Vector.empty)
+          None
         }
       }
-      .map(_.toMap)
+      .map(_.flatten.toMap)
       .flatTap(cache => metaCache.set(cache))
 
   def getMeta(tableName: String): IO[Option[TableMeta]] =
@@ -68,3 +65,8 @@ final class SchemaIntrospector(xa: Transactor[IO], database: String, refreshInte
 
 object SchemaIntrospector:
   private val log = LoggerFactory.getLogger(getClass)
+
+  def apply(xa: Transactor[IO], database: String, refreshInterval: FiniteDuration): IO[SchemaIntrospector] =
+    Ref.of[IO, Map[String, TableMeta]](Map.empty).map { ref =>
+      new SchemaIntrospector(xa, database, refreshInterval, ref)
+    }
