@@ -1,87 +1,67 @@
-# OS / editor junk
+# Operating system files
 .DS_Store
 Thumbs.db
-Desktop.ini
-*.swp
-*.swo
-*~
-.metals/
-# IDEs
-.idea/
-*.iml
-*.ipr
-*.iws
+
+# Editor directories and files
 .vscode/
-*.code-workspace
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
 
-# Java / Gradle
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 .gradle/
-**/build/
-build/
-!build/reports/
-!build/test-results/
-!build/classes/
-!build/generated/
-
-# Local runtime / generated artifacts
 bin/
-.omx/
+project/project/
+project/target/
+target/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Build artifacts
+dist/
+build/
+coverage/
 *.log
-logs/
-*.pid
 *.tmp
 *.temp
 
-# Spring Boot / local config overrides
-application-local*.yml
-application-local*.yaml
-application-dev*.yml
-application-dev*.yaml
-!src/main/resources/application-dev.yaml
-
-# Test / coverage output
-coverage/
-htmlcov/
-*.ec
-*.lcov
-
-# Docker / containers
-.docker/
-compose.override.yml
-
-# Local secrets / credentials
+# Local secrets and overrides
 .env
 .env.*
-!.env.example
 *.pem
 *.key
-*.crt
-*.p12
-*.jks
-*.keystore
-*.wallet/
-wallet/
+*.pfx
+*.cred
+secrets/
+application-local.*
+application-override.*
 
-# Redpanda / local runtime data
-redpanda-data/
-redpanda-logs/
-
-# Kotlin / Gradle wrapper metadata
-.gradle-cache/
-
-# Gradle daemon / task temp files
-.gradle/daemon/
-.gradle/workers/
-.gradle/configuration-cache/
-
-# Optional: keep generated sources tracked if project intentionally commits them
-# Remove the following lines if you want to version those outputs.
-
-# Generated source folders
-# (keep only if they are not meant to be committed)
-generated-sources/
-generated-test-sources/
-
-# Generic temporary files
-.tmp/
-tmp/
+# Misc
+*.swp
+*.swo
+*.DS_Store
+.idea/
+.vscode/
+*.bak
+*.orig
