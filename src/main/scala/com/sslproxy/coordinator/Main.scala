@@ -24,17 +24,18 @@ import scala.concurrent.duration.*
 object Main extends IOApp.Simple:
   private val log = LoggerFactory.getLogger(getClass)
 
-  private val blockingEc: scala.concurrent.ExecutionContext =
-    scala.concurrent.ExecutionContext.fromExecutor(
-      java.util.concurrent.Executors.newCachedThreadPool { r =>
-        val t = new Thread(r, "doobie-tidb-pool")
-        t.setDaemon(true)
-        t
-      }
-    )
-
   override def run: IO[Unit] =
     val cfg = AppConfig.load
+
+    val blockingEc: scala.concurrent.ExecutionContext =
+      scala.concurrent.ExecutionContext.fromExecutor(
+        java.util.concurrent.Executors.newFixedThreadPool(cfg.tidb.poolSize, new java.util.concurrent.ThreadFactory:
+          def newThread(r: Runnable): Thread =
+            val t = new Thread(r, "doobie-tidb-pool")
+            t.setDaemon(true)
+            t
+        )
+      )
     val meterRegistry = new SimpleMeterRegistry()
     val metrics = new CoordinatorMetrics(meterRegistry)
 
@@ -100,7 +101,7 @@ object Main extends IOApp.Simple:
                 val cronScheduler = new CronScheduler(
                   cfg.cron, cfg.ingest, tiDbRepo,
                   backpressureService, batchDispatchService, metrics,
-                  schemaIntrospector
+                  schemaIntrospector, cfg.tidb.poolSize
                 )
 
                 val healthRoutes = new HealthRoutes(oldTx)
@@ -124,15 +125,15 @@ object Main extends IOApp.Simple:
                   )
 
                   val streams =
-                    TidbLoadStream.run(kafka, handler)
-                      .merge(ConsumerStream.run(cfg.kafka, sinkPipe, kafka.producer))
+                    TidbLoadStream.run(kafka, handler, cfg.tidb.poolSize)
+                      .merge(ConsumerStream.run(cfg.kafka, sinkPipe, kafka.producer, cfg.tidb.poolSize))
                       .merge(cronScheduler.mainLoop)
                       .merge(cronScheduler.schemaRefresher)
                       .merge(payloadAuditStream)
                       .merge(wirelessStreams)
 
                   Resource.make(
-                    tiDbRepo.ensureAllCursors(cfg.ingest.streamNames) *>
+                    tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, cfg.tidb.poolSize) *>
                       streams.compile.drain.start.flatMap { fiber =>
                         fiber.join.flatMap {
                           case outcome if !outcome.isSuccess =>

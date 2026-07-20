@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.cron
 
 import cats.effect.IO
+import cats.effect.implicits.*
 import cats.effect.kernel.Ref
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.{CronConfig, IngestConfig}
@@ -20,7 +21,8 @@ class CronScheduler(
     backpressureService: BackpressureService,
     batchDispatchService: BatchDispatchService,
     metrics: CoordinatorMetrics,
-    schemaIntrospector: SchemaIntrospector
+    schemaIntrospector: SchemaIntrospector,
+    parallelism: Int
 ):
   import CronScheduler.log
 
@@ -44,29 +46,52 @@ class CronScheduler(
     schemaIntrospector.startRefresher(knownTables)
 
   val mainLoop: Stream[IO, Unit] =
-    Stream
+    val backpressureStream = Stream
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
-        val tick: IO[Unit] = for
-          _ <- adaptivePull()
-          _ <- backpressureService.checkAndAct.void
-          _ <- processIngest()
-          _ <- recoverStaleBatches()
-          _ <- dispatchBatches()
-          _ <- shadowAudit()
-          _ <- metrics.heartbeat()
-          _ <- IO(metrics.incrementLoopCounter())
-          _ <- loopCounter.update(_ + 1)
-        yield ()
-
-        tick.handleErrorWith { err =>
-          IO(log.error("event=cron_tick status=failed error=\"{}\"", sanitize(err.getMessage))) *>
-            IO(metrics.recordTickFailure())
+        backpressureService.checkAndAct.void.handleErrorWith { err =>
+          IO(log.error("event=cron_backpressure status=failed error=\"{}\"", sanitize(err.getMessage)))
         }
       }
 
-  private def adaptivePull(): IO[Unit] =
-    IO.unit // Stub — dynamic maxPollRecords not yet ported; backpressure provides primary flow control
+    val ingestStream = Stream
+      .awakeEvery[IO](cfg.idleSleepMs.millis)
+      .evalMap { _ =>
+        processIngest().handleErrorWith { err =>
+          IO(log.error("event=cron_ingest status=failed error=\"{}\"", sanitize(err.getMessage)))
+        }
+      }
+
+    val recoverAndDispatchStream = Stream
+      .awakeEvery[IO](cfg.idleSleepMs.millis)
+      .evalMap { _ =>
+        (recoverStaleBatches() >> dispatchBatches()).handleErrorWith { err =>
+          IO(log.error("event=cron_dispatch status=failed error=\"{}\"", sanitize(err.getMessage)))
+        }
+      }
+
+    val shadowAuditStream = Stream
+      .awakeEvery[IO](10.seconds)
+      .evalMap { _ =>
+        shadowAudit().handleErrorWith { err =>
+          IO(log.error("event=cron_shadow_audit status=failed error=\"{}\"", sanitize(err.getMessage)))
+        }
+      }
+
+    val metricsStream = Stream
+      .awakeEvery[IO](cfg.heartbeatLogIntervalMs.millis)
+      .evalMap { _ =>
+        (metrics.heartbeat() >> IO(metrics.incrementLoopCounter()) >> loopCounter.update(_ + 1))
+          .handleErrorWith { err =>
+            IO(log.error("event=cron_metrics status=failed error=\"{}\"", sanitize(err.getMessage)))
+          }
+      }
+
+    backpressureStream
+      .merge(ingestStream)
+      .merge(recoverAndDispatchStream)
+      .merge(shadowAuditStream)
+      .merge(metricsStream)
 
   private def processIngest(): IO[Unit] =
     val budget = cfg.ingestBatchSize.toLong * 2
@@ -122,12 +147,10 @@ class CronScheduler(
     }
 
   private def dispatchBatches(): IO[Unit] =
-    (1 to cfg.dispatchBatchSize).toList.traverse_ { _ =>
-      batchDispatchService.dispatchNext().flatMap {
-        case true  => IO.unit
-        case false => IO.unit
-      }
-    }
+    val concurrency = (cfg.dispatchBatchSize min parallelism).max(1)
+    (1 to cfg.dispatchBatchSize).toList.parTraverseN(concurrency) { _ =>
+      batchDispatchService.dispatchNext().void
+    }.void
 
   private def shadowAudit(): IO[Unit] =
     val intervalMs = 10_000L

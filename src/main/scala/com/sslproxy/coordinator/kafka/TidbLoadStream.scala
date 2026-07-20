@@ -18,6 +18,7 @@ object TidbLoadStream:
   def run(
       components: KafkaComponents,
       handler: TidbLoadHandler,
+      parallelism: Int
   ): Stream[IO, Unit] =
     val cfg = components.config
     components.consumer
@@ -43,7 +44,7 @@ object TidbLoadStream:
             }.as(committable.offset)
           }
       }
-      .parJoinUnbounded
+      .parJoin(parallelism.max(1))
       .through(commitBatch(cfg.pollTimeoutMs))
 
   private def produceResult(

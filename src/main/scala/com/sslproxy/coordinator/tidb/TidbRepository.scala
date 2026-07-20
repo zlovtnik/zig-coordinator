@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.tidb
 
 import cats.effect.IO
+import cats.effect.implicits.*
 import cats.syntax.all.*
 import com.sslproxy.coordinator.domain.{DatabaseError, ScanRequestRecord, SyncLoad}
 import doobie.*
@@ -285,14 +286,21 @@ class TidbRepository(xa: Transactor[IO]):
       yield cursor
     }
 
-  def ensureAllCursors(streamNames: List[String]): IO[Either[DatabaseError, String]] =
-    runDb("tidb.ensure_all_cursors") {
-      streamNames.traverse { name =>
-        sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
-              VALUES ($name, '0', NOW(6))
-              ON DUPLICATE KEY UPDATE updated_at = NOW(6)""".update.run
-      }.map(_ => "ok")
-    }
+  def ensureAllCursors(streamNames: List[String], parallelism: Int = 1): IO[Either[DatabaseError, String]] =
+    if streamNames.isEmpty then IO.pure(Right("ok"))
+    else
+      streamNames.parTraverseN(parallelism.max(1)) { name =>
+        runDb(s"tidb.ensure_cursor_$name") {
+          sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
+                VALUES ($name, '0', NOW(6))
+                ON DUPLICATE KEY UPDATE updated_at = NOW(6)""".update.run
+        }
+      }.map { results =>
+        if results.exists(_.isLeft) then
+          results.collectFirst { case Left(e) => Left(e) }.get
+        else
+          Right("ok")
+      }
 
   private val windowSecs = 60
   private val signalThreshold = -50

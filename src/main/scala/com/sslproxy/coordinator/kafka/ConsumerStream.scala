@@ -15,11 +15,14 @@ object ConsumerStream:
   private val log = LoggerFactory.getLogger(getClass)
   private val commitBatchSize = 500
   private val commitInterval = 15.seconds
+  private val sinkBatchSize = 500
+  private val sinkBatchInterval = 15.seconds
 
   def run(
       cfg: KafkaCfg,
       sinkPipe: SinkPipe,
-      dlqProducer: KafkaProducer[IO, String, String]
+      dlqProducer: KafkaProducer[IO, String, String],
+      maxConcurrency: Int
   ): Stream[IO, Unit] =
     val consumerSettings = ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
@@ -40,33 +43,36 @@ object ConsumerStream:
           .map { partitionStream =>
             partitionStream
               .evalMap { committable =>
-                processRecord(cfg, sinkPipe, dlqProducer, committable)
+                decodeWithDlq(cfg, dlqProducer, committable)
               }
+              .collect { case Some(env) => env }
+              .groupWithin(sinkBatchSize, sinkBatchInterval)
+              .evalMap { chunk =>
+                val items = chunk.toList
+                val offsets = items.map(_._2)
+                val records = items.map(_._1)
+                sinkPipe.processBatch(records.map(e => (e.table, e.ctx, e.row))).as(offsets)
+              }
+              .flatMap(Stream.emits)
           }
-          .parJoinUnbounded
+          .parJoin(maxConcurrency.max(1))
           .through(commitBatch)
       }
 
-  private def processRecord(
+  private def decodeWithDlq(
       cfg: KafkaCfg,
-      sinkPipe: SinkPipe,
       dlqProducer: KafkaProducer[IO, String, String],
       committable: CommittableConsumerRecord[IO, String, String]
-  ): IO[CommittableOffset[IO]] =
+  ): IO[Option[(KafkaEnvelope, CommittableOffset[IO])]] =
     val record = committable.record
     val json = record.value
 
-    val result = for
-      envelope <- IO.fromEither(KafkaEnvelope.decode(json))
-      _        <- IO(log.debug("event=consumer_record status=processing table={} origin={}",
-                     envelope.table, envelope.ctx.origin))
-      _        <- fs2.Stream
-                    .emit((envelope.table, envelope.ctx, envelope.row))
-                    .through(sinkPipe.pipe)
-                    .compile.drain
-    yield ()
-
-    result
+    IO.fromEither(KafkaEnvelope.decode(json))
+      .flatMap { envelope =>
+        IO(log.debug("event=consumer_record status=processing table={} origin={}",
+          envelope.table, envelope.ctx.origin))
+          .as(Some((envelope, committable.offset)))
+      }
       .handleErrorWith { err =>
         val dlqTopic = record.topic + cfg.dlqSuffix
         val dl = DeadLetter(
@@ -79,9 +85,8 @@ object ConsumerStream:
           record.topic, committable.offset, sanitize(err.getMessage))
 
         val dlqRecord = ProducerRecord(dlqTopic, record.key, dl.toDlqJson)
-        dlqProducer.produce(ProducerRecords.one(dlqRecord)).flatten.void
+        dlqProducer.produce(ProducerRecords.one(dlqRecord)).flatten.void.as(None)
       }
-      .as(committable.offset)
 
   private def commitBatch: fs2.Pipe[IO, CommittableOffset[IO], Unit] =
     _.groupWithin(commitBatchSize, commitInterval)

@@ -19,6 +19,9 @@ class GenericTiDbSink(xa: Transactor[IO]):
   def upsert(tableMeta: TableMeta, row: Row): IO[Int] =
     upsertWithRetry(tableMeta, row, 1)
 
+  def batchUpsert(tableMeta: TableMeta, rows: List[Row]): IO[Int] =
+    batchUpsertWithRetry(tableMeta, rows, 1)
+
   private def upsertWithRetry(tableMeta: TableMeta, row: Row, attempt: Int): IO[Int] =
     val sql = buildUpsertSql(tableMeta)
     val normalized = tableMeta.insertColumns.map { c =>
@@ -45,6 +48,39 @@ class GenericTiDbSink(xa: Transactor[IO]):
       else
         IO.raiseError(err)
     }
+
+  private def batchUpsertWithRetry(tableMeta: TableMeta, rows: List[Row], attempt: Int): IO[Int] =
+    if rows.isEmpty then IO.pure(0)
+    else
+      val sql = buildUpsertSql(tableMeta)
+      val normalized = rows.map { row =>
+        tableMeta.insertColumns.map { c =>
+          val key = c.name.toLowerCase(java.util.Locale.ROOT)
+          row.getOrElse(key, ColValue.VNull)
+        }
+      }
+
+      val program: ConnectionIO[Int] = raw { conn =>
+        val ps = conn.prepareStatement(sql)
+        try
+          for rowValues <- normalized do
+            rowValues.zipWithIndex.foreach { case (v, idx) =>
+              setColValue(ps, idx + 1, v)
+            }
+            ps.addBatch()
+          ps.executeBatch().sum
+        finally ps.close()
+      }
+
+      program.transact(xa).handleErrorWith { err =>
+        if attempt < maxRetries && isRetryable(err) then
+          val delay = baseDelay * (1L << (attempt - 1))
+          log.warn("event=generic_sink_batch_retry status=retrying table={} attempt={}/{} rows={} delay={}ms error=\"{}\"",
+            tableMeta.tableName, attempt, maxRetries, rows.size, delay.toMillis, sanitize(err.getMessage))
+          IO.sleep(delay) *> batchUpsertWithRetry(tableMeta, rows, attempt + 1)
+        else
+          IO.raiseError(err)
+      }
 
   def buildUpsertSql(tableMeta: TableMeta): String =
     val cols = tableMeta.insertColumns
