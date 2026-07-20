@@ -1,6 +1,6 @@
 package com.sslproxy.coordinator.tidb
 
-/** Maps stream names to TiDB sink targets. Ported from OracleSinkTarget. */
+/** Maps stream names to TiDB sink targets. */
 enum TidbSinkTarget(val checksumTag: String):
   case ProxyEvents              extends TidbSinkTarget("proxy.events")
   case ProxyPayloadAudit        extends TidbSinkTarget("proxy.payload_audit")

@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.tidb
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 
-/** SHA-256 checksum construction. Ported from OracleChecksum. */
+/** SHA-256 checksum construction. */
 object TidbChecksum:
 
   def checksum(target: TidbSinkTarget, payload: String): String =

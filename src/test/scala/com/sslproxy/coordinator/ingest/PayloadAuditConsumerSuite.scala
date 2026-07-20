@@ -114,4 +114,4 @@ class PayloadAuditConsumerSuite extends FunSuite:
             "observed_at" -> Json.fromString(audit.observedAt)
           ).noSpaces
 
-          Right(com.sslproxy.coordinator.domain.ScanRequestRecord(requestJson, rawJson, payloadSha256))
+          Right(com.sslproxy.coordinator.domain.ScanRequestRecord(requestJson, rawJson, payloadSha256, "proxy.payload_audit", dedupeKey, audit.observedAt))

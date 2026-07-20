@@ -2,7 +2,7 @@ package com.sslproxy.coordinator.tidb
 
 import cats.effect.IO
 
-/** TiDB sink trait — 10 insert methods. Ported from OracleSink. */
+/** TiDB sink trait — 10 insert methods. */
 trait TidbSink:
   def insertProxyEvents(
       batchId: String,

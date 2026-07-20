@@ -6,8 +6,7 @@ import io.circe.JsonObject
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 
-/** Resolves payload_ref strings to JSON and extracts row arrays per sink target.
-  * Port of OraclePayloadResolver.java. */
+/** Resolves payload_ref strings to JSON and extracts row arrays per sink target. */
 class TidbPayloadResolver(syncOutboxDir: String):
 
   def resolvePayload(payloadRef: String): String =

@@ -4,13 +4,13 @@ import cats.effect.IO
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.SyncLoad
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.postgres.CoordinatorRepository
+import com.sslproxy.coordinator.tidb.TidbRepository
 import fs2.kafka.*
 import io.circe.syntax.*
 import org.slf4j.LoggerFactory
 
 class BatchDispatchService(
-    repo: CoordinatorRepository,
+    repo: TidbRepository,
     producer: KafkaProducer[IO, String, String],
     cfg: KafkaCfg,
     metrics: CoordinatorMetrics,
@@ -59,7 +59,7 @@ class BatchDispatchService(
         }
 
   private def validateLoad(load: SyncLoad): Either[String, Unit] =
-    if load == null then Left("sync.oracle.load payload must not be null")
+    if load == null then Left("load payload must not be null")
     else if load.jobId.isBlank then Left("job_id must not be empty")
     else if load.batchId.isBlank then Left("batch_id must not be empty")
     else if load.streamName.isBlank then Left("stream_name must not be empty")

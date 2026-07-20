@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.config.{CronConfig, IngestConfig}
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.postgres.CoordinatorRepository
+import com.sslproxy.coordinator.tidb.TidbRepository
 import com.sslproxy.coordinator.sink.SchemaIntrospector
 import fs2.Stream
 import org.slf4j.LoggerFactory
@@ -16,7 +16,7 @@ import scala.concurrent.duration.*
 class CronScheduler(
     cfg: CronConfig,
     ingestConfig: IngestConfig,
-    repo: CoordinatorRepository,
+    repo: TidbRepository,
     backpressureService: BackpressureService,
     batchDispatchService: BatchDispatchService,
     metrics: CoordinatorMetrics,

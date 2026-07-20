@@ -16,7 +16,7 @@ RUN apk add --no-cache bash curl tar \
     && rm /tmp/sbt.tgz
 
 WORKDIR /app
-COPY services/zig-coordinator/ ./
+COPY services/octopus/ ./
 RUN sbt assembly
 
 # ---- Stage 2: Runtime with Azul Zulu JRE 21 (Alpine) ----
@@ -35,13 +35,13 @@ RUN addgroup -S coordinator \
     && adduser -S -G coordinator coordinator
 
 # Copy the assembled fat JAR
-COPY --chown=coordinator:coordinator --from=builder /app/target/scala-3.3.8/zig-coordinator.jar /app/java-coordinator.jar
+COPY --chown=coordinator:coordinator --from=builder /app/target/scala-3.3.8/octopus.jar /app/octopus.jar
 
 COPY --chown=coordinator:coordinator docker/redpanda /app/docker/redpanda
 
 RUN chown coordinator:coordinator /app \
     && chmod 500 /app \
-    && chmod 400 /app/java-coordinator.jar \
+    && chmod 400 /app/octopus.jar \
     && chmod -R a=rX /app/docker/redpanda
 
 EXPOSE 8081
@@ -51,4 +51,4 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=20s \
 
 USER coordinator
 
-ENTRYPOINT ["java", "-jar", "/app/java-coordinator.jar"]
+ENTRYPOINT ["java", "-jar", "/app/octopus.jar"]

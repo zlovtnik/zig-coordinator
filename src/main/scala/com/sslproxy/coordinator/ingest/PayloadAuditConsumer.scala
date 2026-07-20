@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.{PayloadAudit, ScanRequestRecord}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.postgres.CoordinatorRepository
+import com.sslproxy.coordinator.tidb.TidbRepository
 import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
 import fs2.kafka.*
@@ -21,7 +21,7 @@ object PayloadAuditConsumer:
 
   def stream(
       cfg: KafkaCfg,
-      repo: CoordinatorRepository,
+      repo: TidbRepository,
       metrics: CoordinatorMetrics,
       dlqProducer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
@@ -73,10 +73,10 @@ object PayloadAuditConsumer:
           log.trace("event=payload_audit_ingest status=received payload_bytes={}",
             payloadBytes.length: Integer)
 
-          Right(ScanRequestRecord(requestJson, rawJson, payloadSha256))
+          Right(ScanRequestRecord(requestJson, rawJson, payloadSha256, StreamName, dedupeKey, audit.observedAt))
 
   private def batchWrite(
-      repo: CoordinatorRepository,
+      repo: TidbRepository,
       dlqProducer: KafkaProducer[IO, String, String],
       cfg: KafkaCfg,
       metrics: CoordinatorMetrics

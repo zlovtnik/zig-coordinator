@@ -4,14 +4,14 @@ import pureconfig.ConfigReader
 
 final case class AppConfig(
     tidb: TiDbConfig,
-    postgres: PostgresConfig,
     kafka: KafkaCfg,
     cron: CronConfig,
     ingest: IngestConfig,
     backpressure: BackpressureConfig,
     systemRegistry: SystemRegistryConfig,
     http: HttpConfig,
-    sync: SyncConfig
+    sync: SyncConfig,
+    wireless: WirelessConfig
 ) derives ConfigReader
 
 final case class TiDbConfig(
@@ -61,14 +61,6 @@ final case class CronConfig(
 final case class IngestConfig(
     streamNames: List[String],
     loadStreamNames: List[String]
-) derives ConfigReader
-
-final case class PostgresConfig(
-    jdbcUrl: String,
-    user: String,
-    password: String,
-    poolSize: Int,
-    connectionTimeoutMs: Long
 ) derives ConfigReader
 
 final case class BackpressureConfig(

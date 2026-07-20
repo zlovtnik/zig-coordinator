@@ -2,7 +2,7 @@ package com.sslproxy.coordinator.tidb
 
 import java.time.OffsetDateTime
 
-/** Container for all insert row lists. Ported from OracleRowSet. */
+/** Container for all insert row lists. */
 final case class TidbRowSet(
     proxyEvents: List[ProxyEventInsert],
     blockedEvents: List[BlockedEventInsert],
@@ -45,7 +45,7 @@ object TidbRowSet:
   )
 
 // ---------------------------------------------------------------------------
-// Insert record types — ported from OracleRows.java
+// Insert record types
 // ---------------------------------------------------------------------------
 
 final case class ProxyEventInsert(

@@ -27,7 +27,7 @@ class CoordinatorMetrics(registry: MeterRegistry):
     .register(registry)
 
   private val batchesDispatchedCounter: Counter = Counter.builder("coordinator.batches.dispatched.total")
-    .description("Total batches dispatched to Oracle worker")
+    .description("Total batches dispatched")
     .register(registry)
 
   private val heartbeatCounter: Counter = Counter.builder("coordinator.heartbeat.total")

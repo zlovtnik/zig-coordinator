@@ -1,19 +1,17 @@
 # AGENTS.md
 
 ## Scope
-This file governs `/Users/rcs/git/ssl-proxy/services/zig-coordinator`.
+This file governs `/Users/rcs/git/ssl-proxy/services/octopus`.
 
 ## Project Shape
-- The directory name is legacy. The service is Scala 3 with Cats Effect 3,
-  FS2, Doobie, http4s, fs2-kafka, Circe, and sbt build.
+- Scala 3 with Cats Effect 3, FS2, Doobie, http4s, fs2-kafka, Circe, sbt build.
 - `src/main/scala/com/sslproxy/coordinator/config/` owns pureconfig-backed
   configuration with environment variable overrides.
 - `tidb/` owns TiDB connection setup, transforms, checksums, error classification,
   schema preflight, and sink behavior.
-- `postgres/` owns Postgres cursoring, batch dispatch, and result processing.
-- `kafka/` owns FS2 Kafka consumer/producer streams for load and result topics.
+- `kafka/` owns FS2 Kafka consumer/producer streams for scan, load, and result topics.
 - `cron/` owns the periodic ingest/batch/dispatch scheduler loop.
-- `dispatch/` owns Kafka batch dispatch from Postgres backlog.
+- `dispatch/` owns Kafka batch dispatch from TiDB backlog.
 - `http/` owns the http4s health endpoint.
 - `src/test/scala/` includes MUnit and MUnit Cats Effect tests.
 
@@ -25,8 +23,7 @@ This file governs `/Users/rcs/git/ssl-proxy/services/zig-coordinator`.
 - Keep coordinator operations retry-safe and idempotent: cursor advancement,
   batch leasing, dispatch release/failure, backlog handling, and result
   processing must tolerate duplicate delivery.
-- Keep PostgreSQL function call signatures aligned with root `sql/functions/*`
-  and `sql/postgres.source.sql`; update contract tests when signatures change.
+- Keep TiDB SQL DDL in `tidb/init/` and shared schema in root `sql/tidb/`.
 - Do not commit sbt caches, IDE state, `.omx/` output, or generated local
   runtime files.
 

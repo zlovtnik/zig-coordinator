@@ -8,9 +8,8 @@ import com.sslproxy.coordinator.cron.CronScheduler
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.http.HealthRoutes
 import com.sslproxy.coordinator.ingest.PayloadAuditConsumer
-import com.sslproxy.coordinator.kafka.{ConsumerStream, KafkaComponents, TidbLoadStream}
+import com.sslproxy.coordinator.kafka.{ConsumerStream, KafkaComponents, TidbLoadStream, WirelessConsumerService}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
-import com.sslproxy.coordinator.postgres.{CoordinatorRepository, CursorService, PostgresTransactor}
 import com.sslproxy.coordinator.sink.*
 import com.sslproxy.coordinator.tidb.*
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -67,20 +66,11 @@ object Main extends IOApp.Simple:
         ) { ds => IO.blocking(ds.close()) }
 
       val appResource: Resource[IO, Unit] =
-        (tiDbPoolResource, PostgresTransactor.resource(
-          com.sslproxy.coordinator.postgres.PostgresConfig(
-            jdbcUrl = cfg.postgres.jdbcUrl,
-            user = cfg.postgres.user,
-            password = cfg.postgres.password,
-            poolSize = cfg.postgres.poolSize,
-            connectionTimeoutMs = cfg.postgres.connectionTimeoutMs,
-            poolName = "doobie-postgres-pool"
-          )
-        )).flatMapN { (tiDbDs, postgresXa) =>
+        tiDbPoolResource.flatMap { tiDbDs =>
           val oldTx = TidbTransactor.fromDataSource(tiDbDs, cfg.tidb)
           val tiDbDoobieTx = Transactor.fromDataSource[IO](tiDbDs, blockingEc)
           val preflight = new TidbSchemaPreflight(oldTx, cfg.tidb)
-          val pgRepo = new CoordinatorRepository(postgresXa)
+          val tiDbRepo = new TidbRepository(tiDbDoobieTx)
 
           Resource.eval(preflight.validate()).flatMap { _ =>
             KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
@@ -99,21 +89,19 @@ object Main extends IOApp.Simple:
 
                 val backpressureService = new BackpressureService(
                   cfg.backpressure, cfg.cron.ingestBatchSize,
-                  pgRepo.pendingLedgerCount(), metrics
+                  tiDbRepo.pendingLedgerCount(), metrics
                 )
 
                 val batchDispatchService = new BatchDispatchService(
-                  pgRepo, kafka.producer, cfg.kafka, metrics,
+                  tiDbRepo, kafka.producer, cfg.kafka, metrics,
                   cfg.ingest.loadStreamNames, cfg.cron.batchMaxAttempts
                 )
 
                 val cronScheduler = new CronScheduler(
-                  cfg.cron, cfg.ingest, pgRepo,
+                  cfg.cron, cfg.ingest, tiDbRepo,
                   backpressureService, batchDispatchService, metrics,
                   schemaIntrospector
                 )
-
-                val cursorService = new CursorService(pgRepo, cfg.ingest)
 
                 val healthRoutes = new HealthRoutes(oldTx)
 
@@ -128,7 +116,11 @@ object Main extends IOApp.Simple:
 
                 serverResource.flatMap { _ =>
                   val payloadAuditStream = PayloadAuditConsumer.stream(
-                    cfg.kafka, pgRepo, metrics, kafka.producer
+                    cfg.kafka, tiDbRepo, metrics, kafka.producer
+                  )
+
+                  val wirelessStreams = WirelessConsumerService.allStreams(
+                    cfg.wireless, cfg.kafka.bootstrapServers, tiDbRepo, kafka.producer
                   )
 
                   val streams =
@@ -137,9 +129,10 @@ object Main extends IOApp.Simple:
                       .merge(cronScheduler.mainLoop)
                       .merge(cronScheduler.schemaRefresher)
                       .merge(payloadAuditStream)
+                      .merge(wirelessStreams)
 
                   Resource.make(
-                    cursorService.ensureCursors() *>
+                    tiDbRepo.ensureAllCursors(cfg.ingest.streamNames) *>
                       streams.compile.drain.start.flatMap { fiber =>
                         fiber.join.flatMap {
                           case outcome if !outcome.isSuccess =>
