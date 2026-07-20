@@ -5,13 +5,18 @@ import cats.syntax.all.*
 import com.comcast.ip4s.*
 import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.cron.CronScheduler
+import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.http.HealthRoutes
+import com.sslproxy.coordinator.ingest.PayloadAuditConsumer
 import com.sslproxy.coordinator.kafka.{ConsumerStream, KafkaComponents, TidbLoadStream}
+import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.postgres.{CoordinatorRepository, CursorService, PostgresTransactor}
 import com.sslproxy.coordinator.sink.*
 import com.sslproxy.coordinator.tidb.*
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import fs2.kafka.*
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.http4s.ember.server.EmberServerBuilder
 import org.slf4j.LoggerFactory
 
@@ -31,12 +36,14 @@ object Main extends IOApp.Simple:
 
   override def run: IO[Unit] =
     val cfg = AppConfig.load
+    val meterRegistry = new SimpleMeterRegistry()
+    val metrics = new CoordinatorMetrics(meterRegistry)
 
     if !cfg.tidb.enabled then
       log.warn("event=startup status=disabled tidb_sink=disabled")
       IO.println("TiDB sink disabled (set TIDB_ENABLED=true to enable)").void
     else
-      val poolResource: Resource[IO, HikariDataSource] =
+      val tiDbPoolResource: Resource[IO, HikariDataSource] =
         Resource.make(
           IO.blocking {
             val hc = new HikariConfig()
@@ -60,18 +67,28 @@ object Main extends IOApp.Simple:
         ) { ds => IO.blocking(ds.close()) }
 
       val appResource: Resource[IO, Unit] =
-        poolResource.flatMap { ds =>
-          val oldTx = TidbTransactor.fromDataSource(ds, cfg.tidb)
-          val newTx = Transactor.fromDataSource[IO](ds, blockingEc)
+        (tiDbPoolResource, PostgresTransactor.resource(
+          com.sslproxy.coordinator.postgres.PostgresConfig(
+            jdbcUrl = cfg.postgres.jdbcUrl,
+            user = cfg.postgres.user,
+            password = cfg.postgres.password,
+            poolSize = cfg.postgres.poolSize,
+            connectionTimeoutMs = cfg.postgres.connectionTimeoutMs,
+            poolName = "doobie-postgres-pool"
+          )
+        )).flatMapN { (tiDbDs, postgresXa) =>
+          val oldTx = TidbTransactor.fromDataSource(tiDbDs, cfg.tidb)
+          val tiDbDoobieTx = Transactor.fromDataSource[IO](tiDbDs, blockingEc)
           val preflight = new TidbSchemaPreflight(oldTx, cfg.tidb)
+          val pgRepo = new CoordinatorRepository(postgresXa)
 
           Resource.eval(preflight.validate()).flatMap { _ =>
             KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
-              Resource.eval(SchemaIntrospector(newTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
+              Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
                 val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
                 val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
 
-                val genericSink = new GenericTiDbSink(newTx)
+                val genericSink = new GenericTiDbSink(tiDbDoobieTx)
                 val registry = new SystemRegistry(cfg.systemRegistry)
 
                 val sinkPipe = new SinkPipe(genericSink, schemaIntrospector, registry, dl =>
@@ -80,7 +97,23 @@ object Main extends IOApp.Simple:
                   kafka.producer.produce(ProducerRecords.one(record)).flatten.void
                 )
 
-                val cronScheduler = new CronScheduler(cfg.cron, newTx, schemaIntrospector)
+                val backpressureService = new BackpressureService(
+                  cfg.backpressure, cfg.cron.ingestBatchSize,
+                  pgRepo.pendingLedgerCount(), metrics
+                )
+
+                val batchDispatchService = new BatchDispatchService(
+                  pgRepo, kafka.producer, cfg.kafka, metrics,
+                  cfg.ingest.loadStreamNames, cfg.cron.batchMaxAttempts
+                )
+
+                val cronScheduler = new CronScheduler(
+                  cfg.cron, cfg.ingest, pgRepo,
+                  backpressureService, batchDispatchService, metrics,
+                  schemaIntrospector
+                )
+
+                val cursorService = new CursorService(pgRepo, cfg.ingest)
 
                 val healthRoutes = new HealthRoutes(oldTx)
 
@@ -94,20 +127,28 @@ object Main extends IOApp.Simple:
                   .build
 
                 serverResource.flatMap { _ =>
+                  val payloadAuditStream = PayloadAuditConsumer.stream(
+                    cfg.kafka, pgRepo, metrics, kafka.producer
+                  )
+
                   val streams =
                     TidbLoadStream.run(kafka, handler)
                       .merge(ConsumerStream.run(cfg.kafka, sinkPipe, kafka.producer))
                       .merge(cronScheduler.mainLoop)
                       .merge(cronScheduler.schemaRefresher)
+                      .merge(payloadAuditStream)
 
-                  Resource.make(streams.compile.drain.start.flatMap { fiber =>
-                    fiber.join.flatMap {
-                      case outcome if !outcome.isSuccess =>
-                        log.error("event=stream_fatal status=failed outcome={}", outcome)
-                        IO.raiseError(RuntimeException("Background stream terminated unexpectedly"))
-                      case _ => IO.unit
-                    }.start.as(fiber)
-                  })(_.cancel).void
+                  Resource.make(
+                    cursorService.ensureCursors() *>
+                      streams.compile.drain.start.flatMap { fiber =>
+                        fiber.join.flatMap {
+                          case outcome if !outcome.isSuccess =>
+                            log.error("event=stream_fatal status=failed outcome={}", outcome)
+                            IO.raiseError(RuntimeException("Background stream terminated unexpectedly"))
+                          case _ => IO.unit
+                        }.start.as(fiber)
+                      }
+                  )(_.cancel).void
                 }
               }
             }

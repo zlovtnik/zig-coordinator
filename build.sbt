@@ -50,6 +50,7 @@ val circeVersion = "0.14.14"
 val doobieVersion = "1.0.0-RC10"
 val http4sVersion = "0.23.34"
 val mysqlJdbcVersion = "9.2.0"
+val postgresqlJdbcVersion = "42.7.5"
 val hikariCpVersion = "6.2.1"
 val log4CatsVersion = "2.8.0"
 val slf4jVersion = "2.0.18"
@@ -67,6 +68,7 @@ lazy val root = (project in file("."))
       "com.github.fd4s" %% "fs2-kafka" % fs2KafkaVersion,
       "org.tpolecat" %% "doobie-core" % doobieVersion,
       "org.tpolecat" %% "doobie-hikari" % doobieVersion,
+      "org.tpolecat" %% "doobie-postgres" % doobieVersion,
       "com.monovore" %% "decline" % declineVersion,
       "com.monovore" %% "decline-effect" % declineVersion,
       "com.github.pureconfig" %% "pureconfig-core" % pureconfigVersion,
@@ -78,6 +80,7 @@ lazy val root = (project in file("."))
       "org.http4s" %% "http4s-circe" % http4sVersion,
       "org.http4s" %% "http4s-dsl" % http4sVersion,
       "com.mysql" % "mysql-connector-j" % mysqlJdbcVersion,
+      "org.postgresql" % "postgresql" % postgresqlJdbcVersion,
       "com.zaxxer" % "HikariCP" % hikariCpVersion,
       "io.micrometer" % "micrometer-core" % micrometerVersion,
       "org.typelevel" %% "log4cats-slf4j" % log4CatsVersion,

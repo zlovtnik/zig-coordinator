@@ -23,7 +23,7 @@ object ConsumerStream:
   ): Stream[IO, Unit] =
     val consumerSettings = ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
-      .withGroupId(cfg.consumerGroup)
+      .withGroupId(cfg.loadConsumer)
       .withAutoOffsetReset(AutoOffsetReset.Earliest)
       .withMaxPollRecords(cfg.maxPollRecords)
       .withProperties(
