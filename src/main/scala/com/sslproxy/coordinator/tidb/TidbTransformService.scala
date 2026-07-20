@@ -1,10 +1,8 @@
 package com.sslproxy.coordinator.tidb
 
 import io.circe.Json
-import io.circe.parser.*
 import java.nio.charset.StandardCharsets
 import java.util.UUID
-import scala.jdk.CollectionConverters.*
 import JsonFields.*
 
 /** Pure JSON → case class transforms. Ported from OracleTransformService. */
@@ -59,12 +57,12 @@ object TidbTransformService:
       eventSequence = optionalLong(row, "event_sequence"),
       durationMs = optionalLong(row, "duration_ms"),
       reason = optionalString(row, "reason"),
-      rawJson = rawJson(row, row, "proxy row")
+      rawJson = rawJson(row)
     )
 
   private def transformProxyPayloadAudit(rows: List[Json]): List[ProxyPayloadAuditInsert] =
     rows.map { row =>
-      val raw = rawJson(row, row, "proxy.payload_audit row").getOrElse("{}")
+      val raw = rawJson(row).getOrElse("{}")
       ProxyPayloadAuditInsert(
         correlationId = optionalString(row, "correlation_id").getOrElse(stableCorrelationId(raw)),
         host = requiredString(row, "host", "proxy.payload_audit"),
@@ -149,9 +147,9 @@ object TidbTransformService:
         deviceId = optionalString(row, "device_id"),
         username = optionalString(row, "username"),
         identitySource = optionalString(row, "identity_source").getOrElse("unknown"),
-        tags = jsonArrayString(row, row, "tags"),
-        anomalyReasons = jsonArrayString(row, row, "anomaly_reasons"),
-        rawJson = rawJson(row, row, "wireless.audit row"),
+        tags = jsonArrayString(row, "tags"),
+        anomalyReasons = jsonArrayString(row, "anomaly_reasons"),
+        rawJson = rawJson(row),
         regDomain = optionalString(row, "reg_domain")
       )
     }
@@ -204,7 +202,7 @@ object TidbTransformService:
         ssid = optionalString(row, "ssid"),
         signalDbm = optionalLong(row, "signal_dbm"),
         ssidImpersonation = ssidImpersonation,
-        rawJson = rawJson(row, row, "wireless rogue AP row")
+        rawJson = rawJson(row)
       )
     }
 
@@ -224,7 +222,7 @@ object TidbTransformService:
         windowSecs = requiredLong(row, "window_secs", "wireless.alert.deauth_flood"),
         threshold = optionalLong(row, "threshold").getOrElse(0L),
         signalDbm = optionalLong(row, "signal_dbm"),
-        rawJson = rawJson(row, row, "wireless deauth flood row")
+        rawJson = rawJson(row)
       )
     }
 

@@ -1,7 +1,7 @@
 package com.sslproxy.coordinator.tidb
 
 import io.circe.Json
-import java.time.{OffsetDateTime, ZoneOffset}
+import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 import scala.util.Try
 
@@ -117,13 +117,13 @@ object JsonFields:
       value     <- parentObj.hcursor.get[Double](field).toOption
     yield value
 
-  def jsonArrayString(mapper: Json, row: Json, field: String): Option[String] =
+  def jsonArrayString(row: Json, field: String): Option[String] =
     row.hcursor.downField(field).focus.flatMap { arr =>
       if arr.isNull then None
       else Some(arr.noSpaces)
     }
 
-  def rawJson(mapper: Json, row: Json, context: String): Option[String] =
+  def rawJson(row: Json): Option[String] =
     if row.isNull then None
     else Some(row.noSpaces)
 
@@ -137,8 +137,3 @@ object JsonFields:
   private def parseTimestamp(value: String): Option[OffsetDateTime] =
     Try(OffsetDateTime.parse(value, timestampParser)).toOption
       .orElse(Try(OffsetDateTime.parse(value)).toOption)
-      .orElse {
-        // Try parsing with Z suffix (UTC)
-        val normalized = if value.endsWith("Z") then value else value
-        Try(OffsetDateTime.parse(normalized)).toOption
-      }

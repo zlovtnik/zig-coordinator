@@ -1,11 +1,10 @@
 package com.sslproxy.coordinator.tidb
 
 import io.circe.Json
-import io.circe.parser.*
+import io.circe.JsonObject
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64
-import scala.util.Try
 
 /** Resolves payload_ref strings to JSON and extracts row arrays per sink target.
   * Port of OraclePayloadResolver.java. */
@@ -25,31 +24,40 @@ class TidbPayloadResolver(syncOutboxDir: String):
       throw new IllegalArgumentException(s"unsupported payload_ref scheme: $ref")
 
   def payloadRows(target: TidbSinkTarget, payload: String): List[Json] =
-    val value = parse(payload)
+    val value = parseJson(payload)
     target match
       case TidbSinkTarget.WirelessProbeRequests =>
         val probes = value.hcursor.downField("probes").focus
           .getOrElse(throw new IllegalArgumentException("wireless probe payload must contain a probes array"))
-        probes.asArray.getOrElse(Vector.empty).toList
+        probes.asArray.getOrElse(
+          throw new IllegalArgumentException("wireless probe payload: 'probes' must be an array")
+        ).toList
       case TidbSinkTarget.WirelessClientInventory =>
         val clients = value.hcursor.downField("clients").focus
           .getOrElse(throw new IllegalArgumentException("wireless client inventory payload must contain a clients array"))
+        clients.asArray.getOrElse(
+          throw new IllegalArgumentException("wireless client inventory: 'clients' must be an array")
+        )
         mergeClientInventory(value, clients)
       case _ =>
         value.asArray.getOrElse(Vector(value)).toList
 
   /** Merges parent-level sensor_id/location_id/snapshot_at into each client object. */
   private def mergeClientInventory(payload: Json, clients: Json): List[Json] =
+    val sensorId = payload.hcursor.downField("sensor_id").focus
+    val locationId = payload.hcursor.downField("location_id").focus
+    val snapshotAt = payload.hcursor.downField("snapshot_at").focus
+      .orElse(payload.hcursor.downField("observed_at").focus)
     clients.asArray.getOrElse(Vector.empty).toList.map { client =>
-      val obj = client.asObject.getOrElse(Json.obj())
-      val sensorId = payload.hcursor.downField("sensor_id").focus.getOrElse(Json.Null)
-      val locationId = payload.hcursor.downField("location_id").focus.getOrElse(Json.Null)
-      val snapshotAt = payload.hcursor.downField("snapshot_at").focus
-        .orElse(payload.hcursor.downField("observed_at").focus)
-        .getOrElse(Json.Null)
-      Json.fromJsonObject(
-        obj ++ Json.obj("sensor_id" -> sensorId, "location_id" -> locationId, "snapshot_at" -> snapshotAt)
+      val obj = client.asObject.getOrElse(
+        throw new IllegalArgumentException("wireless client inventory: each client must be a JSON object")
       )
+      val parentFields = List(
+        sensorId.map("sensor_id" -> _),
+        locationId.map("location_id" -> _),
+        snapshotAt.map("snapshot_at" -> _)
+      ).flatten
+      Json.fromJsonObject(parentFields.foldLeft(obj) { case (o, (k, v)) => o.add(k, v) })
     }
 
   private def resolveOutbox(relativePath: String): String =
@@ -71,9 +79,9 @@ class TidbPayloadResolver(syncOutboxDir: String):
     catch
       case e: java.io.InterruptedIOException =>
         Thread.currentThread().interrupt()
-        throw new RuntimeException("outbox payload read interrupted", e)
+        throw new TidbPayloadReadException("outbox payload read interrupted", e)
       case e: java.io.IOException =>
-        throw new RuntimeException(s"outbox payload read failed: ${e.getMessage}", e)
+        throw new TidbPayloadReadException(s"outbox payload read failed: ${e.getMessage}", e)
 
   private def validateJson(payload: String): Unit = parseJson(payload): Unit
 

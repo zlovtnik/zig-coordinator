@@ -1,9 +1,7 @@
 package com.sslproxy.coordinator.tidb
 
-import io.circe.Encoder
-import io.circe.generic.semiauto.*
+import io.circe.{Encoder, Json, JsonObject}
 
-/** Result published to `sync.oracle.result`. Ported from OracleResult. */
 final case class TidbResult(
     jobId: String,
     batchId: String,
@@ -17,7 +15,18 @@ final case class TidbResult(
 )
 
 object TidbResult:
-  given Encoder[TidbResult] = deriveEncoder[TidbResult]
+  given Encoder[TidbResult] = (r: TidbResult) =>
+    Json.fromJsonObject(JsonObject(
+      "job_id"      -> Json.fromString(r.jobId),
+      "batch_id"    -> Json.fromString(r.batchId),
+      "status"      -> Json.fromString(r.status),
+      "row_count"   -> Json.fromInt(r.rowCount),
+      "checksum"    -> Json.fromString(r.checksum),
+      "retryable"   -> Json.fromBoolean(r.retryable),
+      "error_class" -> Json.fromString(r.errorClass),
+      "error_text"  -> Json.fromString(r.errorText),
+      "finished_at" -> Json.fromString(r.finishedAt)
+    ))
 
   def success(jobId: String, batchId: String, rowCount: Int, checksum: String, finishedAt: String): TidbResult =
     TidbResult(

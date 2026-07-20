@@ -1,6 +1,5 @@
 package com.sslproxy.coordinator.tidb
 
-/** TiDB connection configuration. */
 final case class TidbConfig(
     host: String,
     port: Int,
@@ -9,7 +8,9 @@ final case class TidbConfig(
     password: String,
     poolSize: Int,
     connectionTimeoutMs: Long,
-    enabled: Boolean
+    statementTimeoutSecs: Int,
+    enabled: Boolean,
+    warnOnly: Boolean
 )
 
 object TidbConfig:
@@ -20,6 +21,7 @@ object TidbConfig:
   val DefaultPassword: String = ""
   val DefaultPoolSize: Int = 10
   val DefaultConnectionTimeoutMs: Long = 5000L
+  val DefaultStatementTimeoutSecs: Int = 30
 
   def fromEnv: TidbConfig =
     TidbConfig(
@@ -31,7 +33,10 @@ object TidbConfig:
       poolSize = sys.env.get("TIDB_POOL_SIZE").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(DefaultPoolSize),
       connectionTimeoutMs = sys.env.get("TIDB_CONNECTION_TIMEOUT_MS")
         .flatMap(v => scala.util.Try(v.toLong).toOption).getOrElse(DefaultConnectionTimeoutMs),
-      enabled = sys.env.get("TIDB_ENABLED").forall(v => v.equalsIgnoreCase("true") || v == "1")
+      statementTimeoutSecs = sys.env.get("TIDB_STATEMENT_TIMEOUT_SECS")
+        .flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(DefaultStatementTimeoutSecs),
+      enabled = sys.env.get("TIDB_ENABLED").forall(v => v.equalsIgnoreCase("true") || v == "1"),
+      warnOnly = sys.env.get("TIDB_WARN_ONLY").exists(v => v.equalsIgnoreCase("true") || v == "1")
     )
 
   def jdbcUrl(config: TidbConfig): String =

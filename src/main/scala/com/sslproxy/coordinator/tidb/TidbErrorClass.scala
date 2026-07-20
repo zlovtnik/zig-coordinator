@@ -2,9 +2,7 @@ package com.sslproxy.coordinator.tidb
 
 import java.sql.{SQLException, SQLRecoverableException, SQLTransientException}
 import scala.collection.mutable
-import scala.util.control.NonFatal
 
-/** MySQL error classification. Ported from OracleErrorClass. */
 enum TidbErrorClass(val wireValue: String):
   case Retryable extends TidbErrorClass("retryable")
   case Permanent extends TidbErrorClass("permanent")
@@ -47,14 +45,18 @@ object TidbErrorClass:
       normalized.startsWith("08") ||
       normalized.startsWith("40") ||
       normalized == "HYT00" ||
-      normalized == "HYT01"
+      normalized == "HYT01" ||
+      normalized == "70100" // MySQL: unknown SQLSTATE, often transient
     }
 
   private def isRetryableVendorCode(errorCode: Int): Boolean =
     Math.abs(errorCode) match
       // MySQL error codes that are retryable
-      case 1205 | 1213 | 1218 | 2006 | 2013 | 2059 | 40001 => true
-      case _                                                => false
+      case 1205 | 1213 | 1218 | 2006 | 2013 | 2059 => true
+      // TiDB-specific retryable codes
+      case 8002 | 9007 | 9013 | 9014 => true
+      case 40001 => true // serialization failure
+      case _     => false
 
   private def isRetryableMessage(message: String): Boolean =
     val normalized = if message == null then "" else message.toLowerCase(java.util.Locale.ROOT)
@@ -63,4 +65,5 @@ object TidbErrorClass:
     normalized.contains("connection reset") ||
     normalized.contains("deadlock") ||
     normalized.contains("write conflict") ||
-    normalized.contains("lock wait")
+    normalized.contains("lock wait") ||
+    normalized.contains("region unavailable")
