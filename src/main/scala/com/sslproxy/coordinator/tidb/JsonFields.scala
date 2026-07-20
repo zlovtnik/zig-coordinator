@@ -118,9 +118,9 @@ object JsonFields:
     yield value
 
   def jsonArrayString(row: Json, field: String): Option[String] =
-    row.hcursor.downField(field).focus.flatMap { arr =>
-      if arr.isNull then None
-      else Some(arr.noSpaces)
+    row.hcursor.downField(field).focus.flatMap { value =>
+      if value.isNull || !value.isArray then None
+      else Some(value.noSpaces)
     }
 
   def rawJson(row: Json): Option[String] =

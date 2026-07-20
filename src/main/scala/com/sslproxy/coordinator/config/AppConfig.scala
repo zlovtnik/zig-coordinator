@@ -21,7 +21,8 @@ final case class TiDbConfig(
     connectionTimeoutMs: Long,
     statementTimeoutSecs: Int,
     enabled: Boolean,
-    warnOnly: Boolean
+    warnOnly: Boolean,
+    sslMode: String = "VERIFY_IDENTITY"
 ) derives ConfigReader
 
 final case class KafkaCfg(
@@ -52,7 +53,17 @@ final case class SystemRegistryConfig(
 
 final case class HttpConfig(
     port: Int
-) derives ConfigReader
+)
+
+object HttpConfig:
+  given ConfigReader[HttpConfig] =
+    ConfigReader.forProduct1("port") { port =>
+      if port < 0 || port > 65535 then
+        throw new IllegalArgumentException(
+          s"Invalid COORDINATOR_HTTP_PORT: $port — must be between 0 and 65535"
+        )
+      HttpConfig(port)
+    }
 
 final case class SyncConfig(
     outboxDir: String

@@ -20,7 +20,10 @@ object DoobieTransactor:
     )
 
   def resource(cfg: TiDbConfig): Resource[IO, HikariTransactor[IO]] =
-    val jdbcUrl = s"jdbc:mysql://${cfg.host}:${cfg.port}/${cfg.database}?rewriteBatchedStatements=true&useSSL=false&allowPublicKeyRetrieval=true"
+    val jdbcUrl = s"jdbc:mysql://${cfg.host}:${cfg.port}/${cfg.database}?rewriteBatchedStatements=true" +
+      (cfg.sslMode match
+        case "DISABLED" => "&useSSL=false&allowPublicKeyRetrieval=true"
+        case mode       => s"&sslMode=$mode")
 
     HikariTransactor
       .newHikariTransactor[IO](

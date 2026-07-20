@@ -316,10 +316,10 @@ final class TidbTransactor private (ds: HikariDataSource, config: TidbConfig) ex
             r.publishedAt.map(ts).orNull
           )
         )
-        executeBatch(stmt, params)
+        val inserted = executeBatch(stmt, params)
+        mergeBandwidthAlerts(conn, batchId, rows)
+        inserted
       finally stmt.close()
-
-      mergeBandwidthAlerts(conn, batchId, rows)
     }
 
   private def mergeBandwidthAlerts(conn: Connection, batchId: String, rows: List[WirelessBandwidthInsert]): Long =

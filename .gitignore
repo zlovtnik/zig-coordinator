@@ -45,6 +45,17 @@ coverage/
 *.tmp
 *.temp
 
+# Local secrets and overrides
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.cred
+secrets/
+application-local.*
+application-override.*
+
 # Misc
 *.swp
 *.swo

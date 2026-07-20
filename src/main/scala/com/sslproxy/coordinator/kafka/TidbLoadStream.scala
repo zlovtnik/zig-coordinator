@@ -5,6 +5,8 @@ import com.sslproxy.coordinator.config.KafkaConfig
 import com.sslproxy.coordinator.tidb.{TidbLoadHandler, TidbResult}
 import fs2.Stream
 import fs2.kafka.*
+import io.circe.Json
+import io.circe.parser.parse
 import io.circe.syntax.*
 import org.slf4j.LoggerFactory
 
@@ -59,13 +61,12 @@ object TidbLoadStream:
       err: Throwable
   ): IO[Unit] =
     val dlqTopic = cfg.loadTopic + cfg.dlqSuffix
-    val dlqValue = s"""{"original":${record.value},"error":"${sanitize(err.getMessage)}"}"""
+    val original = parse(record.value).getOrElse(Json.fromString(record.value))
+    val error = Option(err.getMessage).fold(Json.Null)(Json.fromString)
+    val dlqValue = Json.obj("original" -> original, "error" -> error).noSpaces
     val dlqRecord = ProducerRecord(dlqTopic, record.key, dlqValue)
     components.producer.produce(ProducerRecords.one(dlqRecord)).flatten.void
 
   private def commitBatch(timeoutMs: Long): fs2.Pipe[IO, CommittableOffset[IO], Unit] =
     _.groupWithin(50, timeoutMs.millis)
       .evalMap(CommittableOffsetBatch.fromFoldable(_).commit)
-
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')

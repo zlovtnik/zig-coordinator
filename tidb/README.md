@@ -82,12 +82,12 @@ Ten tables translated from Oracle to TiDB-compatible MySQL DDL:
 
 ### Oracle Procedures (Not Migrated)
 
-TiDB does not support stored procedures. The two Oracle procedures must be inlined into `JdbcOracleSink`:
+TiDB does not support stored procedures. Implement the equivalent logic in the coordinator's TiDB sink:
 
 1. **`WIRELESS_UPSERT_SENSOR`** → `INSERT ... ON DUPLICATE KEY UPDATE` in `insertWirelessAuditFrames()`
-2. **`WIRELESS_MERGE_BANDWIDTH_ALERTS`** → Java-side aggregation + `INSERT ... ON DUPLICATE KEY UPDATE` in `insertWirelessBandwidth()`
+2. **`WIRELESS_MERGE_BANDWIDTH_ALERTS`** → application-side aggregation + `INSERT ... ON DUPLICATE KEY UPDATE` in `insertWirelessBandwidth()`
 
-### TiDB-Specific Considerations for the Java Sink
+### TiDB-Specific Considerations for the Coordinator Sink
 
 1. **No stored procedures** — All logic must be in Java.
 2. **Optimistic transactions** — TiDB uses Percolator model. Write conflicts surface as errors on `commit()`, not blocking waits. Add retry-on-conflict logic with exponential backoff.

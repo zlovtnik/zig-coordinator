@@ -10,7 +10,8 @@ final case class TidbConfig(
     connectionTimeoutMs: Long,
     statementTimeoutSecs: Int,
     enabled: Boolean,
-    warnOnly: Boolean
+    warnOnly: Boolean,
+    sslMode: String = "VERIFY_IDENTITY"
 )
 
 object TidbConfig:
@@ -36,8 +37,12 @@ object TidbConfig:
       statementTimeoutSecs = sys.env.get("TIDB_STATEMENT_TIMEOUT_SECS")
         .flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(DefaultStatementTimeoutSecs),
       enabled = sys.env.get("TIDB_ENABLED").forall(v => v.equalsIgnoreCase("true") || v == "1"),
-      warnOnly = sys.env.get("TIDB_WARN_ONLY").exists(v => v.equalsIgnoreCase("true") || v == "1")
+      warnOnly = sys.env.get("TIDB_WARN_ONLY").exists(v => v.equalsIgnoreCase("true") || v == "1"),
+      sslMode = sys.env.getOrElse("TIDB_SSL_MODE", "VERIFY_IDENTITY")
     )
 
   def jdbcUrl(config: TidbConfig): String =
-    s"jdbc:mysql://${config.host}:${config.port}/${config.database}?rewriteBatchedStatements=true&useSSL=false&allowPublicKeyRetrieval=true"
+    val base = s"jdbc:mysql://${config.host}:${config.port}/${config.database}?rewriteBatchedStatements=true"
+    config.sslMode match
+      case "DISABLED" => s"$base&useSSL=false&allowPublicKeyRetrieval=true"
+      case mode       => s"$base&sslMode=$mode"
