@@ -10,8 +10,14 @@ import java.sql.{Connection, PreparedStatement, Timestamp, Types}
 import java.time.{Instant, OffsetDateTime}
 import scala.concurrent.duration.*
 
-final class TidbTransactor private (ds: HikariDataSource, config: TiDbConfig) extends TidbSink:
+final class TidbTransactor private (
+    ds: HikariDataSource,
+    config: TiDbConfig,
+    tlsMaterial: Option[TidbTlsMaterial]
+) extends TidbSink:
   import TidbTransactor.log
+
+  def dataSource: HikariDataSource = ds
 
   private val batchSize: Int = 500
 
@@ -572,8 +578,9 @@ final class TidbTransactor private (ds: HikariDataSource, config: TiDbConfig) ex
 
   def close(): IO[Unit] =
     IO.blocking {
-      ds.close()
-      log.info("TidbTransactor: HikariCP pool closed")
+      try ds.close()
+      finally tlsMaterial.foreach(_.delete())
+      log.info("TidbTransactor: HikariCP pool and TLS material closed")
     }
 
   private def rollbackQuietly(conn: Connection): Unit =
@@ -590,7 +597,7 @@ object TidbTransactor:
     Resource.make(allocate(config))(_.close())
 
   def fromDataSource(ds: HikariDataSource, config: TiDbConfig): TidbTransactor =
-    new TidbTransactor(ds, config)
+    new TidbTransactor(ds, config, None)
 
   private def allocate(config: TiDbConfig): IO[TidbTransactor] =
     IO.blocking {
@@ -607,15 +614,24 @@ object TidbTransactor:
       hikariConfig.addDataSourceProperty("cachePrepStmts", "true")
       hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250")
       hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
+      hikariConfig.addDataSourceProperty("connectionTimeZone", "UTC")
+      hikariConfig.addDataSourceProperty("forceConnectionTimeZoneToSession", "true")
+      val tlsMaterial = TidbTls.configure(hikariConfig, config)
 
-      val ds = new HikariDataSource(hikariConfig)
-      log.info("TidbTransactor: HikariCP pool allocated to {}:{}/{}",
-        config.host, config.port, config.database)
-      new TidbTransactor(ds, config)
+      try
+        val ds = new HikariDataSource(hikariConfig)
+        log.info("TidbTransactor: HikariCP pool allocated to {}:{}/{}",
+          config.host, config.port, config.database)
+        new TidbTransactor(ds, config, Some(tlsMaterial))
+      catch
+        case error: Throwable =>
+          tlsMaterial.delete()
+          throw error
     }
 
   def jdbcUrl(config: TiDbConfig): String =
-    val base = s"jdbc:mysql://${config.host}:${config.port}/${config.database}?rewriteBatchedStatements=true"
+    val base = s"jdbc:mysql://${config.host}:${config.port}/${config.database}" +
+      "?rewriteBatchedStatements=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
     config.sslMode match
       case "DISABLED" => s"$base&useSSL=false&allowPublicKeyRetrieval=true"
-      case mode       => s"$base&sslMode=$mode"
+      case mode       => s"$base&sslMode=$mode&fallbackToSystemTrustStore=false"

@@ -219,7 +219,7 @@ object WirelessConsumerService:
     ConsumerSettings[IO, String, String]
       .withBootstrapServers(bootstrapServers)
       .withGroupId(groupId)
-      .withAutoOffsetReset(AutoOffsetReset.Earliest)
+      .withAutoOffsetReset(AutoOffsetReset.None)
       .withMaxPollRecords(maxPollRecords)
       .withProperties(
         "allow.auto.create.topics" -> "false",
@@ -230,5 +230,4 @@ object WirelessConsumerService:
   private def commitBatch: fs2.Pipe[IO, CommittableOffset[IO], Unit] =
     _.groupWithin(500, 15.seconds)
       .evalMap(CommittableOffsetBatch.fromFoldable(_).commit)
-
 

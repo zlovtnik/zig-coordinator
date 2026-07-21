@@ -1,0 +1,189 @@
+package com.sslproxy.coordinator.kafka
+
+import cats.effect.{IO, Ref}
+import com.sslproxy.coordinator.config.KafkaCfg
+import com.sslproxy.coordinator.cutover.{CutoffKey, CutoverError, CutoverOffsetEvidence, VerifiedCutoverArtifact}
+import com.sslproxy.coordinator.domain.BrokerRecordMetadata
+import com.sslproxy.coordinator.util.Sha256Utils
+import fs2.Stream
+import fs2.kafka.{CommittableConsumerRecord, ConsumerRecord, KafkaConsumer}
+import org.apache.kafka.common.TopicPartition
+import org.slf4j.LoggerFactory
+
+private[kafka] final case class CutoverOffsetGuardState(
+    bootstrapped: Set[CutoffKey]
+):
+  def contains(key: CutoffKey): Boolean = bootstrapped.contains(key)
+
+private[kafka] object CutoverOffsetGuardState:
+  val empty: CutoverOffsetGuardState = CutoverOffsetGuardState(Set.empty)
+
+/** Pure state transition used to distinguish the one exact bootstrap check
+  * from ordinary at-or-after authorization for a partition.
+  */
+private[kafka] object CutoverOffsetGuard:
+  def authorize(
+      state: CutoverOffsetGuardState,
+      artifact: VerifiedCutoverArtifact,
+      groupId: String,
+      topic: String,
+      partition: Int,
+      offset: Long
+  ): Either[CutoverError, (CutoverOffsetGuardState, CutoverOffsetEvidence)] =
+    val key = CutoffKey(groupId, topic, partition)
+    artifact.requireCoverage(List(key)).flatMap { _ =>
+      val authorization =
+        if state.contains(key) then
+          artifact.authorizeRecordOffset(groupId, topic, partition, offset)
+        else
+          artifact.verifyBootstrapPosition(groupId, topic, partition, offset)
+
+      authorization.map { evidence =>
+        (CutoverOffsetGuardState(state.bootstrapped + key), evidence)
+      }
+    }
+
+private[kafka] final case class LockedBrokerRecord(
+    record: ConsumerRecord[String, String],
+    metadata: BrokerRecordMetadata,
+    authorization: CutoverOffsetEvidence
+)
+
+/** A single-topic/single-group consumer boundary. Each call allocates a new
+  * KafkaConsumer and commits a record only after `process` has durably handled
+  * it. Any missing offset, replay below the cutoff, bootstrap gap, decode
+  * failure, or database failure terminates this processor without committing.
+  */
+private[kafka] object LockedTopicConsumer:
+  private val log = LoggerFactory.getLogger(getClass)
+
+  def stream(
+      cfg: KafkaCfg,
+      groupId: String,
+      topic: String,
+      artifact: VerifiedCutoverArtifact
+  )(
+      process: LockedBrokerRecord => IO[Unit]
+  ): Stream[IO, Unit] =
+    Stream.eval(Ref.of[IO, CutoverOffsetGuardState](CutoverOffsetGuardState.empty)).flatMap { guard =>
+      Stream
+        .resource(KafkaConsumer.resource(KafkaComponents.consumerSettings(cfg, groupId)))
+        .flatMap { consumer =>
+          Stream.eval(preflightAndSubscribe(consumer, artifact, groupId, topic)) >> {
+            val coverage = consumer.assignmentStream
+              .evalMap(partitions => IO.fromEither(validateCoverage(artifact, groupId, topic, partitions)))
+              .drain
+
+            val records = consumer.partitionedStream
+              .map { partitionStream =>
+                partitionStream.evalMap { committable =>
+                  processRecord(guard, artifact, groupId, topic, committable, process)
+                }
+              }
+              .parJoinUnbounded
+
+            records.concurrently(coverage)
+          }
+        }
+    }
+
+  private def preflightAndSubscribe(
+      consumer: KafkaConsumer[IO, String, String],
+      artifact: VerifiedCutoverArtifact,
+      groupId: String,
+      topic: String
+  ): IO[Unit] =
+    for
+      partitions <- consumer.partitionsFor(topic)
+      _ <- IO.raiseWhen(partitions.isEmpty)(
+        IllegalStateException(s"broker returned no partitions for locked topic $topic")
+      )
+      keys = partitions.map(info => CutoffKey(groupId, info.topic, info.partition))
+      _ <- IO.fromEither(artifact.requireCoverage(keys))
+      _ <- consumer.subscribeTo(topic)
+    yield ()
+
+  private def processRecord(
+      guard: Ref[IO, CutoverOffsetGuardState],
+      artifact: VerifiedCutoverArtifact,
+      groupId: String,
+      expectedTopic: String,
+      committable: CommittableConsumerRecord[IO, String, String],
+      process: LockedBrokerRecord => IO[Unit]
+  ): IO[Unit] =
+    val record = committable.record
+
+    for
+      rawValue <- IO.fromOption(Option(record.value))(
+        IllegalArgumentException(
+          s"tombstone is not valid for group=$groupId topic=${record.topic} " +
+            s"partition=${record.partition} offset=${record.offset}"
+        )
+      )
+      _ <- IO.raiseWhen(record.topic != expectedTopic)(
+        IllegalStateException(
+          s"consumer group $groupId received unexpected topic ${record.topic}; expected $expectedTopic"
+        )
+      )
+      authorization <- authorize(
+        guard,
+        artifact,
+        groupId,
+        record.topic,
+        record.partition,
+        record.offset
+      )
+      metadata = BrokerRecordMetadata(
+        topic = record.topic,
+        partition = record.partition,
+        offset = record.offset,
+        consumerGroup = groupId,
+        groupVersion = artifact.artifact.groupVersion,
+        artifactSha256 = artifact.artifact.artifactSha256,
+        messageKey = Option(record.key),
+        payloadSha256 = Sha256Utils.sha256Hex(rawValue)
+      )
+      _ <- IO(log.debug(
+        "event=locked_consumer_record status=authorized group={} topic={} partition={} offset={} cutoff={}",
+        groupId,
+        record.topic,
+        record.partition,
+        record.offset,
+        authorization.cutoffOffset
+      ))
+      _ <- process(LockedBrokerRecord(record, metadata, authorization))
+      _ <- committable.offset.commit
+    yield ()
+
+  private def authorize(
+      guard: Ref[IO, CutoverOffsetGuardState],
+      artifact: VerifiedCutoverArtifact,
+      groupId: String,
+      topic: String,
+      partition: Int,
+      offset: Long
+  ): IO[CutoverOffsetEvidence] =
+    guard.modify { state =>
+      CutoverOffsetGuard.authorize(state, artifact, groupId, topic, partition, offset) match
+        case Right((next, evidence)) => (next, Right(evidence))
+        case Left(error)             => (state, Left(error))
+    }.flatMap(IO.fromEither)
+
+  private[kafka] def validateCoverage(
+      artifact: VerifiedCutoverArtifact,
+      groupId: String,
+      expectedTopic: String,
+      partitions: Iterable[TopicPartition]
+  ): Either[Throwable, Unit] =
+    val unexpected = partitions.iterator.filter(_.topic != expectedTopic).toList
+    if unexpected.nonEmpty then
+      Left(IllegalStateException(
+        s"consumer group $groupId was assigned unexpected topics: " +
+          unexpected.map(_.topic).distinct.sorted.mkString(",")
+      ))
+    else
+      artifact.requireCoverage(
+        partitions.iterator.map(partition =>
+          CutoffKey(groupId, partition.topic, partition.partition)
+        ).toList
+      )

@@ -8,7 +8,6 @@ import io.circe.parser.decode as circeDecode
 import io.circe.syntax.*
 
 final class KafkaComponents(
-    val consumer: KafkaConsumer[IO, String, String],
     val producer: KafkaProducer[IO, String, String],
     val config: KafkaCfg
 )
@@ -16,24 +15,28 @@ final class KafkaComponents(
 object KafkaComponents:
 
   def resource(cfg: KafkaCfg): Resource[IO, KafkaComponents] =
-    for
-      consumer <- createConsumer(cfg)
-      producer <- createProducer(cfg)
-    yield KafkaComponents(consumer, producer, cfg)
+    createProducer(cfg).map(producer => KafkaComponents(producer, cfg))
 
-  private def createConsumer(cfg: KafkaCfg): Resource[IO, KafkaConsumer[IO, String, String]] =
-    val consumerSettings = ConsumerSettings[IO, String, String]
+  /** Every processor gets its own KafkaConsumer resource. There is deliberately
+    * no shared consumer here: a subscription and group identity are part of the
+    * processor's durable contract.
+    */
+  private[kafka] def consumerSettings(
+      cfg: KafkaCfg,
+      groupId: String
+  ): ConsumerSettings[IO, String, String] =
+    ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
-      .withGroupId(cfg.loadConsumer + "-tidb-load")
-      .withAutoOffsetReset(AutoOffsetReset.Earliest)
+      .withGroupId(groupId)
+      .withAutoOffsetReset(AutoOffsetReset.None)
+      .withEnableAutoCommit(false)
+      .withIsolationLevel(IsolationLevel.ReadCommitted)
       .withMaxPollRecords(cfg.maxPollRecords)
       .withProperties(
         "allow.auto.create.topics" -> "false",
         "session.timeout.ms" -> "30000",
         "heartbeat.interval.ms" -> "3000"
       )
-
-    fs2.kafka.KafkaConsumer.resource(consumerSettings)
 
   private def createProducer(cfg: KafkaCfg): Resource[IO, KafkaProducer[IO, String, String]] =
     val producerSettings = ProducerSettings[IO, String, String]
@@ -49,6 +52,9 @@ object KafkaComponents:
 
   def deserializeLoad(json: String): Either[Throwable, TidbLoad] =
     circeDecode[TidbLoad](json)
+
+  def deserializeResult(json: String): Either[Throwable, TidbResult] =
+    circeDecode[TidbResult](json)
 
   def serializeResult(result: TidbResult): String =
     result.asJson.noSpaces

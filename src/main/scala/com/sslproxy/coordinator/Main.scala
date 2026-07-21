@@ -13,7 +13,6 @@ import com.sslproxy.coordinator.kafka.{ConsumerStream, KafkaComponents, TidbLoad
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.sink.*
 import com.sslproxy.coordinator.tidb.*
-import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.Transactor
 import fs2.kafka.*
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -44,32 +43,9 @@ object Main extends IOApp.Simple:
       log.warn("event=startup status=disabled tidb_sink=disabled")
       IO.println("TiDB sink disabled (set TIDB_ENABLED=true to enable)").void
     else
-      val tiDbPoolResource: Resource[IO, HikariDataSource] =
-        Resource.make(
-          IO.blocking {
-            val hc = new HikariConfig()
-            hc.setJdbcUrl(TidbTransactor.jdbcUrl(cfg.tidb))
-            hc.setUsername(cfg.tidb.user)
-            hc.setPassword(cfg.tidb.password)
-            hc.setMaximumPoolSize(cfg.tidb.poolSize)
-            hc.setConnectionTimeout(cfg.tidb.connectionTimeoutMs)
-            hc.setDriverClassName("com.mysql.cj.jdbc.Driver")
-            hc.setPoolName("tidb-pool")
-            hc.setAutoCommit(true)
-            hc.setConnectionTestQuery("SELECT 1")
-            hc.addDataSourceProperty("cachePrepStmts", "true")
-            hc.addDataSourceProperty("prepStmtCacheSize", "250")
-            hc.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
-            val ds = new HikariDataSource(hc)
-            log.info("TiDB pool allocated to {}:{}/{}",
-              cfg.tidb.host, cfg.tidb.port, cfg.tidb.database)
-            ds
-          }
-        ) { ds => IO.blocking(ds.close()) }
-
       val appResource: Resource[IO, Fiber[IO, Throwable, Unit]] =
-        tiDbPoolResource.flatMap { tiDbDs =>
-          val oldTx = TidbTransactor.fromDataSource(tiDbDs, cfg.tidb)
+        TidbTransactor.resource(cfg.tidb).flatMap { oldTx =>
+          val tiDbDs = oldTx.dataSource
           val tiDbDoobieTx = Transactor.fromDataSource[IO](tiDbDs, blockingEc)
           val preflight = new TidbSchemaPreflight(oldTx, cfg.tidb)
           val tiDbRepo = new TidbRepository(tiDbDoobieTx)
@@ -96,8 +72,14 @@ object Main extends IOApp.Simple:
                   )
 
                   val batchDispatchService = new BatchDispatchService(
-                    tiDbRepo, kafka.producer, cfg.kafka, metrics,
-                    cfg.ingest.loadStreamNames, cfg.cron.batchMaxAttempts
+                    tiDbRepo,
+                    kafka.producer,
+                    metrics,
+                    java.util.UUID.randomUUID().toString,
+                    List(cfg.kafka.loadTopic, cfg.kafka.resultTopic),
+                    cfg.cron.batchDispatchLeaseSeconds,
+                    cfg.cron.scanRetryBackoffSeconds,
+                    cfg.cron.batchDispatchLeaseSeconds
                   )
 
                   val cronScheduler = new CronScheduler(

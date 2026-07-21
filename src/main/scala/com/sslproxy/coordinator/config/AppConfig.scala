@@ -1,5 +1,6 @@
 package com.sslproxy.coordinator.config
 
+import cats.data.NonEmptyList
 import pureconfig.ConfigReader
 
 final case class AppConfig(
@@ -11,7 +12,10 @@ final case class AppConfig(
     systemRegistry: SystemRegistryConfig,
     http: HttpConfig,
     sync: SyncConfig,
-    wireless: WirelessConfig
+    wireless: WirelessConfig,
+    runtime: RuntimeConfig,
+    processors: ProcessorConfig,
+    cutover: CutoverConfig
 ) derives ConfigReader
 
 final case class TiDbConfig(
@@ -25,7 +29,12 @@ final case class TiDbConfig(
     statementTimeoutSecs: Int,
     enabled: Boolean,
     warnOnly: Boolean,
-    sslMode: String = "VERIFY_IDENTITY"
+    sslMode: String = "VERIFY_IDENTITY",
+    sslCaPath: String = "",
+    sslServerName: String = "",
+    sslClientKeyStorePath: String = "",
+    sslClientKeyStorePassword: String = "",
+    sslClientKeyStoreType: String = "PKCS12"
 ) derives ConfigReader
 
 final case class KafkaCfg(
@@ -91,6 +100,171 @@ final case class SyncConfig(
     outboxDir: String
 ) derives ConfigReader
 
+final case class RuntimeConfig(
+    processorsEnabled: Boolean,
+    consumersEnabled: Boolean
+) derives ConfigReader:
+  def anyEnabled: Boolean = processorsEnabled || consumersEnabled
+
+final case class ProcessorConfig(
+    enabled: List[String],
+    restartBaseDelayMs: Long,
+    restartMaxDelayMs: Long
+) derives ConfigReader
+
+final case class CutoverConfig(
+    artifactPath: String,
+    signaturePath: String,
+    publicKeyPath: String,
+    publicKeyBase64: String,
+    publicKeySha256: String,
+    expectedSchemaVersion: Int,
+    expectedClusterId: String,
+    requiredConsumerGroups: List[String]
+) derives ConfigReader
+
+final case class AppConfigValidation(errors: NonEmptyList[String])
+    extends IllegalArgumentException(
+      errors.toList.mkString("Invalid Octopus configuration: ", "; ", "")
+    )
+
 object AppConfig:
+  private val VersionedConsumerGroup = "^[A-Za-z0-9._-]+[-_.]v[1-9][0-9]*$".r
+  private val Sha256Hex = "^[0-9a-f]{64}$".r
+
   def load: AppConfig =
-    pureconfig.ConfigSource.default.loadOrThrow[AppConfig]
+    val config = pureconfig.ConfigSource.default.loadOrThrow[AppConfig]
+    validate(config).fold(error => throw error, identity)
+
+  def validate(config: AppConfig): Either[AppConfigValidation, AppConfig] =
+    val stagedTiDbErrors =
+      if config.tidb.enabled then enabledTiDbErrors(config.tidb)
+      else List.empty
+    val runtimeErrors =
+      if config.runtime.anyEnabled then activeRuntimeErrors(config)
+      else List.empty
+    val errors = processorErrors(config.processors) ++ stagedTiDbErrors ++ runtimeErrors
+
+    NonEmptyList.fromList(errors) match
+      case Some(values) => Left(AppConfigValidation(values))
+      case None         => Right(config)
+
+  private def processorErrors(config: ProcessorConfig): List[String] =
+    List(
+      Option.when(config.enabled.exists(_.trim.isEmpty))(
+        "processors.enabled must not contain blank processor IDs"
+      ),
+      Option.when(config.enabled.distinct.size != config.enabled.size)(
+        "processors.enabled must not contain duplicate processor IDs"
+      ),
+      Option.when(config.restartBaseDelayMs <= 0L)(
+        "processors.restart-base-delay-ms must be positive"
+      ),
+      Option.when(config.restartMaxDelayMs < config.restartBaseDelayMs)(
+        "processors.restart-max-delay-ms must be at least processors.restart-base-delay-ms"
+      )
+    ).flatten
+
+  private def enabledTiDbErrors(config: TiDbConfig): List[String] =
+    val normalizedHost = config.host.trim.toLowerCase(java.util.Locale.ROOT)
+    val loopbackHosts = Set("localhost", "127.0.0.1", "::1", "[::1]")
+
+    List(
+      required(config.host, "tidb.host"),
+      Option.when(loopbackHosts.contains(normalizedHost))(
+        "tidb.host must reference the external TiDB cluster, not loopback"
+      ),
+      Option.when(config.port <= 0 || config.port > 65535)(
+        "tidb.port must be between 1 and 65535"
+      ),
+      required(config.database, "tidb.database"),
+      required(config.user, "tidb.user"),
+      Option.when(config.user.trim.equalsIgnoreCase("root"))(
+        "tidb.user must be a least-privilege non-root account"
+      ),
+      required(config.password, "tidb.password"),
+      Option.when(config.poolSize <= 0)("tidb.pool-size must be positive"),
+      Option.when(config.connectionTimeoutMs <= 0L)(
+        "tidb.connection-timeout-ms must be positive"
+      ),
+      Option.when(config.statementTimeoutSecs <= 0)(
+        "tidb.statement-timeout-secs must be positive"
+      ),
+      Option.when(config.sslMode != "VERIFY_IDENTITY")(
+        "tidb.ssl-mode must be VERIFY_IDENTITY"
+      ),
+      required(config.sslCaPath, "tidb.ssl-ca-path"),
+      required(config.sslServerName, "tidb.ssl-server-name"),
+      Option.when(
+        config.sslServerName.trim.nonEmpty &&
+          !config.sslServerName.trim.equalsIgnoreCase(config.host.trim)
+      )(
+        "tidb.ssl-server-name must equal tidb.host because Connector/J verifies the JDBC host identity"
+      ),
+      Option.when(
+        config.sslClientKeyStorePath.trim.nonEmpty != config.sslClientKeyStorePassword.nonEmpty
+      )(
+        "tidb.ssl-client-key-store-path and tidb.ssl-client-key-store-password must be configured together"
+      ),
+      Option.when(
+        !Set("JKS", "PKCS12").contains(config.sslClientKeyStoreType.trim.toUpperCase(java.util.Locale.ROOT))
+      )(
+        "tidb.ssl-client-key-store-type must be JKS or PKCS12"
+      ),
+      Option.when(config.warnOnly)(
+        "tidb.warn-only must be false when TiDB readiness is enabled"
+      )
+    ).flatten
+
+  private def activeRuntimeErrors(config: AppConfig): List[String] =
+    val cutover = config.cutover
+    val configuredGroups = List(
+      config.kafka.scanConsumer,
+      config.kafka.resultConsumer,
+      config.kafka.payloadAuditConsumer,
+      config.kafka.loadConsumer,
+      config.wireless.macLookupConsumer,
+      config.wireless.networksAuthorizedConsumer,
+      config.wireless.probeFlushConsumer
+    )
+    val requiredGroups = cutover.requiredConsumerGroups
+    val keySources = List(cutover.publicKeyPath, cutover.publicKeyBase64).count(_.trim.nonEmpty)
+
+    List(
+      Option.when(!config.tidb.enabled)(
+        "an enabled runtime requires tidb.enabled=true"
+      ),
+      required(cutover.artifactPath, "cutover.artifact-path"),
+      required(cutover.signaturePath, "cutover.signature-path"),
+      Option.when(keySources != 1)(
+        "exactly one of cutover.public-key-path or cutover.public-key-base-64 is required"
+      ),
+      Option.when(Sha256Hex.findFirstIn(cutover.publicKeySha256).isEmpty)(
+        "cutover.public-key-sha-256 must be 64 lowercase hexadecimal characters"
+      ),
+      Option.when(cutover.expectedSchemaVersion <= 0)(
+        "cutover.expected-schema-version must be positive"
+      ),
+      required(cutover.expectedClusterId, "cutover.expected-cluster-id"),
+      Option.when(requiredGroups.isEmpty)(
+        "cutover.required-consumer-groups must not be empty"
+      ),
+      Option.when(requiredGroups.distinct.size != requiredGroups.size)(
+        "cutover.required-consumer-groups must not contain duplicates"
+      ),
+      Option.when(configuredGroups.exists(group => !isVersionedConsumerGroup(group)))(
+        "every configured consumer group must end in a non-zero version suffix such as -v1"
+      ),
+      Option.when(requiredGroups.exists(group => !isVersionedConsumerGroup(group)))(
+        "every cutover.required-consumer-groups entry must end in a non-zero version suffix such as -v1"
+      ),
+      Option.when(configuredGroups.toSet != requiredGroups.toSet)(
+        "cutover.required-consumer-groups must exactly match the configured consumer groups"
+      )
+    ).flatten
+
+  private def required(value: String, path: String): Option[String] =
+    Option.when(value.trim.isEmpty)(s"$path must not be blank")
+
+  private def isVersionedConsumerGroup(group: String): Boolean =
+    VersionedConsumerGroup.findFirstIn(group).nonEmpty

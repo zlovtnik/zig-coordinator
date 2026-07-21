@@ -133,17 +133,13 @@ class CronScheduler(
     }
 
   private def recoverStaleBatches(): IO[Unit] =
-    repo.recoverStaleDispatchedBatches(
-      ingestConfig.loadStreamNames,
-      cfg.batchDispatchLeaseSeconds,
-      cfg.batchMaxAttempts
-    ).flatMap {
+    repo.recoverExpiredOutboxLeases().flatMap {
       case Left(err) =>
-        IO(log.error("event=stale_batch_recovery status=failed operation={} error=\"{}\"",
+        IO(log.error("event=outbox_lease_recovery status=failed operation={} error=\"{}\"",
           err.operation, sanitize(err.message)))
       case Right(count) =>
         IO.whenA(count > 0)(
-          IO(log.info("event=stale_batch_recovery status=recovered count={}", count))
+          IO(log.info("event=outbox_lease_recovery status=recovered count={}", count))
         )
     }
 
