@@ -1,7 +1,8 @@
 package com.sslproxy.coordinator
 
 import cats.effect.{IO, IOApp, Resource}
-import cats.syntax.all.*
+import cats.effect.kernel.Fiber
+import cats.effect.std.Semaphore
 import com.comcast.ip4s.*
 import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.cron.CronScheduler
@@ -66,7 +67,7 @@ object Main extends IOApp.Simple:
           }
         ) { ds => IO.blocking(ds.close()) }
 
-      val appResource: Resource[IO, Unit] =
+      val appResource: Resource[IO, Fiber[IO, Throwable, Unit]] =
         tiDbPoolResource.flatMap { tiDbDs =>
           val oldTx = TidbTransactor.fromDataSource(tiDbDs, cfg.tidb)
           val tiDbDoobieTx = Transactor.fromDataSource[IO](tiDbDs, blockingEc)
@@ -74,75 +75,70 @@ object Main extends IOApp.Simple:
           val tiDbRepo = new TidbRepository(tiDbDoobieTx)
 
           Resource.eval(preflight.validate()).flatMap { _ =>
-            KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
-              Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
-                val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
-                val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
+            Resource.eval(Semaphore[IO](cfg.tidb.poolSize.toLong)).flatMap { dbSemaphore =>
+              KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
+                Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
+                  val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
+                  val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
 
-                val genericSink = new GenericTiDbSink(tiDbDoobieTx)
-                val registry = new SystemRegistry(cfg.systemRegistry)
+                  val genericSink = new GenericTiDbSink(tiDbDoobieTx)
+                  val registry = new SystemRegistry(cfg.systemRegistry)
 
-                val sinkPipe = new SinkPipe(genericSink, schemaIntrospector, registry, dl =>
-                  val dlqTopic = cfg.kafka.loadTopic + cfg.kafka.dlqSuffix
-                  val record = ProducerRecord(dlqTopic, dl.table, dl.toDlqJson)
-                  kafka.producer.produce(ProducerRecords.one(record)).flatten.void
-                )
-
-                val backpressureService = new BackpressureService(
-                  cfg.backpressure, cfg.cron.ingestBatchSize,
-                  tiDbRepo.pendingLedgerCount(), metrics
-                )
-
-                val batchDispatchService = new BatchDispatchService(
-                  tiDbRepo, kafka.producer, cfg.kafka, metrics,
-                  cfg.ingest.loadStreamNames, cfg.cron.batchMaxAttempts
-                )
-
-                val cronScheduler = new CronScheduler(
-                  cfg.cron, cfg.ingest, tiDbRepo,
-                  backpressureService, batchDispatchService, metrics,
-                  schemaIntrospector, cfg.tidb.poolSize
-                )
-
-                val healthRoutes = new HealthRoutes(oldTx)
-
-                val httpPort = Port.fromInt(cfg.http.port).getOrElse(
-                  sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")
-                )
-                val serverResource = EmberServerBuilder.default[IO]
-                  .withPort(httpPort)
-                  .withHost(host"0.0.0.0")
-                  .withHttpApp(healthRoutes.routes.orNotFound)
-                  .build
-
-                serverResource.flatMap { _ =>
-                  val payloadAuditStream = PayloadAuditConsumer.stream(
-                    cfg.kafka, tiDbRepo, metrics, kafka.producer
+                  val sinkPipe = new SinkPipe(genericSink, schemaIntrospector, registry, dl =>
+                    val dlqTopic = cfg.kafka.loadTopic + cfg.kafka.dlqSuffix
+                    val record = ProducerRecord(dlqTopic, dl.table, dl.toDlqJson)
+                    kafka.producer.produce(ProducerRecords.one(record)).flatten.void
                   )
 
-                  val wirelessStreams = WirelessConsumerService.allStreams(
-                    cfg.wireless, cfg.kafka.bootstrapServers, tiDbRepo, kafka.producer
+                  val backpressureService = new BackpressureService(
+                    cfg.backpressure, cfg.cron.ingestBatchSize,
+                    tiDbRepo.pendingLedgerCount(), metrics
                   )
 
-                  val streams =
-                    TidbLoadStream.run(kafka, handler, cfg.tidb.poolSize)
-                      .merge(ConsumerStream.run(cfg.kafka, sinkPipe, kafka.producer, cfg.tidb.poolSize))
-                      .merge(cronScheduler.mainLoop)
-                      .merge(cronScheduler.schemaRefresher)
-                      .merge(payloadAuditStream)
-                      .merge(wirelessStreams)
+                  val batchDispatchService = new BatchDispatchService(
+                    tiDbRepo, kafka.producer, cfg.kafka, metrics,
+                    cfg.ingest.loadStreamNames, cfg.cron.batchMaxAttempts
+                  )
 
-                  Resource.make(
-                    tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, cfg.tidb.poolSize) *>
-                      streams.compile.drain.start.flatMap { fiber =>
-                        fiber.join.flatMap {
-                          case outcome if !outcome.isSuccess =>
-                            log.error("event=stream_fatal status=failed outcome={}", outcome)
-                            IO.raiseError(RuntimeException("Background stream terminated unexpectedly"))
-                          case _ => IO.unit
-                        }.start.as(fiber)
-                      }
-                  )(_.cancel).void
+                  val cronScheduler = new CronScheduler(
+                    cfg.cron, cfg.ingest, tiDbRepo,
+                    backpressureService, batchDispatchService, metrics,
+                    schemaIntrospector, dbSemaphore
+                  )
+
+                  val healthRoutes = new HealthRoutes(oldTx)
+
+                  val httpPort = Port.fromInt(cfg.http.port).getOrElse(
+                    sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")
+                  )
+                  val serverResource = EmberServerBuilder.default[IO]
+                    .withPort(httpPort)
+                    .withHost(host"0.0.0.0")
+                    .withHttpApp(healthRoutes.routes.orNotFound)
+                    .build
+
+                  serverResource.flatMap { _ =>
+                    val payloadAuditStream = PayloadAuditConsumer.stream(
+                      cfg.kafka, tiDbRepo, metrics, kafka.producer
+                    )
+
+                    val wirelessStreams = WirelessConsumerService.allStreams(
+                      cfg.wireless, cfg.kafka.bootstrapServers, tiDbRepo, kafka.producer
+                    )
+
+                    val streams =
+                      TidbLoadStream.run(kafka, handler, dbSemaphore)
+                        .merge(ConsumerStream.run(cfg.kafka, sinkPipe, kafka.producer, dbSemaphore))
+                        .merge(cronScheduler.mainLoop)
+                        .merge(cronScheduler.schemaRefresher)
+                        .merge(payloadAuditStream)
+                        .merge(wirelessStreams)
+
+                    Resource.make(
+                      tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, dbSemaphore) *>
+                        streams.compile.drain.start
+                    )(_.cancel)
+                  }
                 }
               }
             }
@@ -152,4 +148,4 @@ object Main extends IOApp.Simple:
       log.info("event=startup status=starting tidb_host={} tidb_port={} tidb_database={}",
         cfg.tidb.host, cfg.tidb.port, cfg.tidb.database)
 
-      appResource.useForever
+      appResource.use(_.joinWithNever)

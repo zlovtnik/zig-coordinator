@@ -53,26 +53,15 @@ class BackpressureServiceSuite extends CatsEffectSuite:
       assertEquals(suspended, true)
 
   test("resume when pending count falls to recovery threshold after suspension"):
-    val svc = BackpressureService(cfg, ingestBatchSize, IO.pure(Right(4000L)), metrics)
-    for
-      _ <- svc.checkAndAct
-      suspended <- svc.isConsumerSuspended
-      _ <- IO(suspended) // force eval
-    yield
-      assertEquals(suspended, true)
-
-  test("resume when pending count drops below recovery threshold"):
-    val pausedCfg = BackpressureConfig(
-      budgetMultiplier = 4,
-      adaptivePullChangeThreshold = 50,
-      adaptivePullMinRestartIntervalMs = 10000
-    )
-    val metrics2 = new CoordinatorMetrics(SimpleMeterRegistry())
-
     for
       countRef <- cats.effect.kernel.Ref[IO].of(Right(5000L): Either[DatabaseError, Long])
-      svc = BackpressureService(pausedCfg, ingestBatchSize, countRef.getAndSet(Right(2000L)), metrics2)
+      svc = BackpressureService(cfg, ingestBatchSize, countRef.getAndSet(Right(5000L)), metrics)
       _ <- svc.checkAndAct
+      suspended1 <- svc.isConsumerSuspended
+      _ <- countRef.set(Right(1500L))
+      count2 <- svc.checkAndAct
+      suspended2 <- svc.isConsumerSuspended
     yield
-      // At 5000L >= 4000, should suspend; then at 2000L <= 2000, should resume
-      ()
+      assertEquals(count2, 1500L)
+      assertEquals(suspended1, true)
+      assertEquals(suspended2, false)

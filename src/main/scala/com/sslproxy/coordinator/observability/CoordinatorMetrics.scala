@@ -5,7 +5,8 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.micrometer.core.instrument.{Counter, Gauge, MeterRegistry}
 import org.slf4j.LoggerFactory
 
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.{ConcurrentHashMap, atomic}
+import atomic.AtomicLong
 
 class CoordinatorMetrics(registry: MeterRegistry):
   import CoordinatorMetrics.log
@@ -13,6 +14,9 @@ class CoordinatorMetrics(registry: MeterRegistry):
   private val pendingLedgerGauge: AtomicLong = new AtomicLong(0)
   private val backpressureActiveGauge: AtomicLong = new AtomicLong(0)
   private val ingestLastSuccessTimestamp: AtomicLong = new AtomicLong(0)
+
+  private val routeRunningGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
+  private val routeSuspendedGauges: ConcurrentHashMap[String, AtomicLong] = ConcurrentHashMap()
 
   private val loopAttemptsCounter: Counter = Counter.builder("coordinator.loop.attempts.total")
     .description("Total main loop iterations")
@@ -85,12 +89,23 @@ class CoordinatorMetrics(registry: MeterRegistry):
   def recordTickFailure(): Unit = ()
 
   def recordRouteState(role: String, routeId: String, running: Boolean, suspended: Boolean): Unit =
-    val _ = Gauge.builder("coordinator.route.running", () => if running then 1.0 else 0.0)
-      .tags("role", role, "route", routeId)
-      .register(registry)
-    val _ = Gauge.builder("coordinator.route.suspended", () => if suspended then 1.0 else 0.0)
-      .tags("role", role, "route", routeId)
-      .register(registry)
+    val tagKey = s"$role:$routeId"
+    val runningHolder = routeRunningGauges.computeIfAbsent(tagKey, _ =>
+      val h = new AtomicLong(if running then 1L else 0L)
+      Gauge.builder("coordinator.route.running", h, (v: AtomicLong) => v.doubleValue())
+        .tags("role", role, "route", routeId)
+        .register(registry)
+      h
+    )
+    runningHolder.set(if running then 1L else 0L)
+    val suspendedHolder = routeSuspendedGauges.computeIfAbsent(tagKey, _ =>
+      val h = new AtomicLong(if suspended then 1L else 0L)
+      Gauge.builder("coordinator.route.suspended", h, (v: AtomicLong) => v.doubleValue())
+        .tags("role", role, "route", routeId)
+        .register(registry)
+      h
+    )
+    suspendedHolder.set(if suspended then 1L else 0L)
 
   def heartbeat(): IO[Unit] =
     IO(heartbeatCounter.increment()) *>

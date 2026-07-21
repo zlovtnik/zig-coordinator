@@ -2,6 +2,7 @@ package com.sslproxy.coordinator.tidb
 
 import cats.effect.IO
 import cats.effect.implicits.*
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.domain.{DatabaseError, ScanRequestRecord, SyncLoad}
 import doobie.*
@@ -237,8 +238,7 @@ class TidbRepository(xa: Transactor[IO]):
       else
         for
           _ <- (sql"""UPDATE sync_batches
-                      SET attempt_count = attempt_count + 1,
-                          status = CASE WHEN attempt_count + 1 >= $vMaxAttempts THEN 'failed' ELSE 'pending' END,
+                      SET status = CASE WHEN attempt_count >= $vMaxAttempts THEN 'failed' ELSE 'pending' END,
                           last_error = $errorText,
                           updated_at = NOW(6)
                       WHERE batch_id = $batchId AND status = 'dispatched'""").update.run
@@ -286,20 +286,25 @@ class TidbRepository(xa: Transactor[IO]):
       yield cursor
     }
 
-  def ensureAllCursors(streamNames: List[String], parallelism: Int = 1): IO[Either[DatabaseError, String]] =
+  def ensureAllCursors(streamNames: List[String], dbSemaphore: Semaphore[IO]): IO[Either[DatabaseError, String]] =
     if streamNames.isEmpty then IO.pure(Right("ok"))
     else
-      streamNames.parTraverseN(parallelism.max(1)) { name =>
-        runDb(s"tidb.ensure_cursor_$name") {
-          sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
-                VALUES ($name, '0', NOW(6))
-                ON DUPLICATE KEY UPDATE updated_at = NOW(6)""".update.run
+      dbSemaphore.available.flatMap { available =>
+        val parallelism = available.toInt.max(1)
+        streamNames.parTraverseN(parallelism) { name =>
+          dbSemaphore.permit.use { _ =>
+            runDb(s"tidb.ensure_cursor_$name") {
+              sql"""INSERT INTO sync_cursors (stream_name, cursor_value, updated_at)
+                    VALUES ($name, '0', NOW(6))
+                    ON DUPLICATE KEY UPDATE updated_at = NOW(6)""".update.run
+            }
+          }
+        }.map { results =>
+          if results.exists(_.isLeft) then
+            results.collectFirst { case Left(e) => Left(e) }.get
+          else
+            Right("ok")
         }
-      }.map { results =>
-        if results.exists(_.isLeft) then
-          results.collectFirst { case Left(e) => Left(e) }.get
-        else
-          Right("ok")
       }
 
   private val windowSecs = 60
@@ -325,8 +330,8 @@ class TidbRepository(xa: Transactor[IO]):
               e.observed_at,
               LOWER(COALESCE(NULLIF(TRIM(e.payload->>'$$.destination_bssid'), ''), NULLIF(TRIM(e.payload->>'$$.bssid'), ''))) AS destination_bssid,
               e.payload->>'$$.ssid' AS ssid,
-              COALESCE(e.payload->>'$$.sensor_id', e.payload->>'$$.sensor_id') AS sensor_id,
-              COALESCE(e.payload->>'$$.location_id', e.payload->>'$$.location_id') AS location_id,
+              e.payload->>'$$.sensor_id' AS sensor_id,
+              e.payload->>'$$.location_id' AS location_id,
               CAST(e.payload->>'$$.signal_dbm' AS SIGNED) AS signal_dbm
             FROM sync_events e
             WHERE e.stream_name = 'wireless.audit'

@@ -3,6 +3,7 @@ package com.sslproxy.coordinator.cron
 import cats.effect.IO
 import cats.effect.implicits.*
 import cats.effect.kernel.Ref
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.{CronConfig, IngestConfig}
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
@@ -22,7 +23,7 @@ class CronScheduler(
     batchDispatchService: BatchDispatchService,
     metrics: CoordinatorMetrics,
     schemaIntrospector: SchemaIntrospector,
-    parallelism: Int
+    dbSemaphore: Semaphore[IO]
 ):
   import CronScheduler.log
 
@@ -94,7 +95,7 @@ class CronScheduler(
       .merge(metricsStream)
 
   private def processIngest(): IO[Unit] =
-    val budget = cfg.ingestBatchSize.toLong * 2
+    val budget = backpressureService.budget
 
     repo.pendingLedgerCount().flatMap {
       case Left(err) =>
@@ -147,10 +148,14 @@ class CronScheduler(
     }
 
   private def dispatchBatches(): IO[Unit] =
-    val concurrency = (cfg.dispatchBatchSize min parallelism).max(1)
-    (1 to cfg.dispatchBatchSize).toList.parTraverseN(concurrency) { _ =>
-      batchDispatchService.dispatchNext().void
-    }.void
+    dbSemaphore.available.flatMap { available =>
+      val concurrency = (cfg.dispatchBatchSize min available.toInt).max(1)
+      (1 to cfg.dispatchBatchSize).toList.parTraverseN(concurrency) { _ =>
+        dbSemaphore.permit.use { _ =>
+          batchDispatchService.dispatchNext().void
+        }
+      }.void
+    }
 
   private def shadowAudit(): IO[Unit] =
     val intervalMs = 10_000L

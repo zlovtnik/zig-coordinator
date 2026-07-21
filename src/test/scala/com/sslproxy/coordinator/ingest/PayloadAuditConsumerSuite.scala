@@ -9,6 +9,8 @@ import java.util.Base64
 
 class PayloadAuditConsumerSuite extends FunSuite:
 
+  import PayloadAuditConsumer.translateRecord
+
   private val validJson = """{
     "observed_at": "2026-06-01T12:00:00Z",
     "host": "api.example.com",
@@ -92,26 +94,4 @@ class PayloadAuditConsumerSuite extends FunSuite:
     assert(result.isLeft)
     assertEquals(result.swap.toOption.get, PayloadAuditError.EmptyMessage)
 
-  private def translateRecord(record: fs2.kafka.ConsumerRecord[String, String]): Either[PayloadAuditError, com.sslproxy.coordinator.domain.ScanRequestRecord] =
-    val rawJson = record.value
-    if rawJson == null || rawJson.isEmpty then
-      Left(PayloadAuditError.EmptyMessage)
-    else
-      PayloadAudit.parse(rawJson) match
-        case Left(err) =>
-          Left(PayloadAuditError.InvalidPayload(rawJson, err.getMessage))
-        case Right(audit) =>
-          val payloadBytes = rawJson.getBytes(StandardCharsets.UTF_8)
-          val payloadSha256 = Sha256Utils.sha256Hex(payloadBytes)
-          val dedupeKey = Sha256Utils.sha256Hex(s"proxy.payload_audit:$payloadSha256")
-          val payloadRef = s"inline://json/${Base64.getUrlEncoder.withoutPadding.encodeToString(payloadBytes)}"
 
-          import io.circe.Json
-          val requestJson = Json.obj(
-            "stream_name" -> Json.fromString("proxy.payload_audit"),
-            "dedupe_key" -> Json.fromString(dedupeKey),
-            "payload_ref" -> Json.fromString(payloadRef),
-            "observed_at" -> Json.fromString(audit.observedAt)
-          ).noSpaces
-
-          Right(com.sslproxy.coordinator.domain.ScanRequestRecord(requestJson, rawJson, payloadSha256, "proxy.payload_audit", dedupeKey, audit.observedAt))

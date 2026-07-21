@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
+import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.errors.DeadLetter
 import com.sslproxy.coordinator.model.SystemContext
@@ -22,7 +23,7 @@ object ConsumerStream:
       cfg: KafkaCfg,
       sinkPipe: SinkPipe,
       dlqProducer: KafkaProducer[IO, String, String],
-      maxConcurrency: Int
+      dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     val consumerSettings = ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
@@ -35,6 +36,7 @@ object ConsumerStream:
         "heartbeat.interval.ms" -> "3000"
       )
 
+    val parallelism = 4
     Stream
       .resource(fs2.kafka.KafkaConsumer.resource(consumerSettings))
       .flatMap { consumer =>
@@ -45,17 +47,24 @@ object ConsumerStream:
               .evalMap { committable =>
                 decodeWithDlq(cfg, dlqProducer, committable)
               }
-              .collect { case Some(env) => env }
               .groupWithin(sinkBatchSize, sinkBatchInterval)
               .evalMap { chunk =>
-                val items = chunk.toList
-                val offsets = items.map(_._2)
-                val records = items.map(_._1)
-                sinkPipe.processBatch(records.map(e => (e.table, e.ctx, e.row))).as(offsets)
+                dbSemaphore.permit.use { _ =>
+                  val items = chunk.toList
+                  val offsets = items.map(_._2)
+                  val records = items.flatMap(_._1.toList)
+                  if records.nonEmpty then
+                    sinkPipe.processBatch(records.map(e => (e.table, e.ctx, e.row)))
+                      .handleErrorWith { err =>
+                        IO(log.error("event=sink_pipe_batch status=failed error=\"{}\"", sanitize(err.getMessage)))
+                      }
+                      .as(offsets)
+                  else IO.pure(offsets)
+                }
               }
               .flatMap(Stream.emits)
           }
-          .parJoin(maxConcurrency.max(1))
+          .parJoin(parallelism.max(1))
           .through(commitBatch)
       }
 
@@ -63,7 +72,7 @@ object ConsumerStream:
       cfg: KafkaCfg,
       dlqProducer: KafkaProducer[IO, String, String],
       committable: CommittableConsumerRecord[IO, String, String]
-  ): IO[Option[(KafkaEnvelope, CommittableOffset[IO])]] =
+  ): IO[(Option[KafkaEnvelope], CommittableOffset[IO])] =
     val record = committable.record
     val json = record.value
 
@@ -71,7 +80,7 @@ object ConsumerStream:
       .flatMap { envelope =>
         IO(log.debug("event=consumer_record status=processing table={} origin={}",
           envelope.table, envelope.ctx.origin))
-          .as(Some((envelope, committable.offset)))
+          .as((Some(envelope), committable.offset))
       }
       .handleErrorWith { err =>
         val dlqTopic = record.topic + cfg.dlqSuffix
@@ -85,7 +94,7 @@ object ConsumerStream:
           record.topic, committable.offset, sanitize(err.getMessage))
 
         val dlqRecord = ProducerRecord(dlqTopic, record.key, dl.toDlqJson)
-        dlqProducer.produce(ProducerRecords.one(dlqRecord)).flatten.void.as(None)
+        dlqProducer.produce(ProducerRecords.one(dlqRecord)).flatten.void.as((None, committable.offset))
       }
 
   private def commitBatch: fs2.Pipe[IO, CommittableOffset[IO], Unit] =

@@ -35,7 +35,7 @@ RUN addgroup -S coordinator \
     && adduser -S -G coordinator coordinator
 
 # Copy the assembled fat JAR
-COPY --chown=coordinator:coordinator --from=builder /app/target/scala-3.3.8/octopus.jar /app/octopus.jar
+COPY --chown=coordinator:coordinator --from=builder /app/target/scala-3.*/octopus.jar /app/octopus.jar
 
 COPY --chown=coordinator:coordinator docker/redpanda /app/docker/redpanda
 

@@ -9,6 +9,8 @@ import com.sslproxy.coordinator.tidb.TidbRepository
 import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
 import fs2.kafka.*
+import io.circe.Json
+import io.circe.parser as circeParser
 import org.slf4j.LoggerFactory
 
 import java.nio.charset.StandardCharsets
@@ -46,7 +48,7 @@ object PayloadAuditConsumer:
             .through(commitBatch)
       }
 
-  private def translateRecord(
+  private[ingest] def translateRecord(
       record: ConsumerRecord[String, String]
   ): Either[PayloadAuditError, ScanRequestRecord] =
     val rawJson = record.value
@@ -96,7 +98,9 @@ object PayloadAuditConsumer:
               IO(metrics.recordPayloadAuditIngested(count))
             case Left(dbErr) =>
               IO(log.error("event=payload_audit_ingest status=failed operation={} error=\"{}\"",
-                dbErr.operation, sanitize(dbErr.message)))
+                dbErr.operation, sanitize(dbErr.message))) *>
+                IO.raiseError(new RuntimeException(
+                  s"${dbErr.operation}: ${dbErr.message}", dbErr.cause))
           }
         else IO.unit
 
@@ -119,7 +123,11 @@ object PayloadAuditConsumer:
       case PayloadAuditError.EmptyMessage => IO.unit
       case PayloadAuditError.InvalidPayload(rawJson, errorMsg) =>
         val dlqTopic = cfg.payloadAuditTopic + cfg.dlqSuffix
-        val dlqValue = s"""{"original":$rawJson,"error":"${sanitize(errorMsg)}"}"""
+        val original = circeParser.parse(rawJson).getOrElse(Json.fromString(rawJson))
+        val dlqValue = Json.obj(
+          "original" -> original,
+          "error" -> Json.fromString(sanitize(errorMsg))
+        ).noSpaces
         val record = ProducerRecord(dlqTopic, null, dlqValue)
         dlqProducer.produce(ProducerRecords.one(record)).flatten.void
 
