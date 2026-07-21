@@ -1,6 +1,7 @@
 package com.sslproxy.coordinator.kafka
 
 import cats.effect.IO
+import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.tidb.{TidbLoadHandler, TidbResult}
 import fs2.Stream
@@ -18,32 +19,36 @@ object TidbLoadStream:
   def run(
       components: KafkaComponents,
       handler: TidbLoadHandler,
+      dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     val cfg = components.config
+    val parallelism = 4
     components.consumer
       .partitionedStream
       .map { partitionStream =>
         partitionStream
           .filter(_.record.topic == cfg.loadTopic)
           .evalMap { committable =>
-            val record = committable.record
-            val json = record.value
+            dbSemaphore.permit.use { _ =>
+              val record = committable.record
+              val json = record.value
 
-            (for
-              load <- IO.fromEither(KafkaComponents.deserializeLoad(json))
-              _    <- IO(log.info("event=tidb_load_consumer status=processing batch_id={} stream_name={}",
-                         load.batchId, load.streamName))
-              result <- handler.handle(load)
-              _      <- produceResult(components, cfg, result)
-              _      <- IO(log.info("event=tidb_load_consumer status=completed batch_id={} status={} row_count={}",
-                         load.batchId, result.status, result.rowCount))
-            yield ()).handleErrorWith { err =>
-              IO(log.error("event=tidb_load_consumer status=failed error=\"{}\"", err.getMessage)) *>
-              produceDlq(components, cfg, record, err)
-            }.as(committable.offset)
+              (for
+                load <- IO.fromEither(KafkaComponents.deserializeLoad(json))
+                _    <- IO(log.info("event=tidb_load_consumer status=processing batch_id={} stream_name={}",
+                           load.batchId, load.streamName))
+                result <- handler.handle(load)
+                _      <- produceResult(components, cfg, result)
+                _      <- IO(log.info("event=tidb_load_consumer status=completed batch_id={} status={} row_count={}",
+                           load.batchId, result.status, result.rowCount))
+              yield ()).handleErrorWith { err =>
+                IO(log.error("event=tidb_load_consumer status=failed error=\"{}\"", err.getMessage)) *>
+                produceDlq(components, cfg, record, err)
+              }.as(committable.offset)
+            }
           }
       }
-      .parJoinUnbounded
+      .parJoin(parallelism.max(1))
       .through(commitBatch(cfg.pollTimeoutMs))
 
   private def produceResult(

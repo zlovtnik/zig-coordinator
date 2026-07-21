@@ -5,7 +5,7 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 import JsonFields.*
 
-/** Pure JSON → case class transforms. Ported from OracleTransformService. */
+/** Pure JSON → case class transforms. */
 object TidbTransformService:
 
   def transform(target: TidbSinkTarget, rows: List[Json]): TidbRowSet =

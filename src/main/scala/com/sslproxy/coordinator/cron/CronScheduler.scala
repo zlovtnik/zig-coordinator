@@ -1,11 +1,15 @@
 package com.sslproxy.coordinator.cron
 
 import cats.effect.IO
+import cats.effect.implicits.*
 import cats.effect.kernel.Ref
-import com.sslproxy.coordinator.config.CronConfig
+import cats.effect.std.Semaphore
+import cats.syntax.all.*
+import com.sslproxy.coordinator.config.{CronConfig, IngestConfig}
+import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
+import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.tidb.TidbRepository
 import com.sslproxy.coordinator.sink.SchemaIntrospector
-import doobie.*
-import doobie.implicits.*
 import fs2.Stream
 import org.slf4j.LoggerFactory
 
@@ -13,26 +17,18 @@ import scala.concurrent.duration.*
 
 class CronScheduler(
     cfg: CronConfig,
-    xa: Transactor[IO],
-    schemaIntrospector: SchemaIntrospector
+    ingestConfig: IngestConfig,
+    repo: TidbRepository,
+    backpressureService: BackpressureService,
+    batchDispatchService: BatchDispatchService,
+    metrics: CoordinatorMetrics,
+    schemaIntrospector: SchemaIntrospector,
+    dbSemaphore: Semaphore[IO]
 ):
   import CronScheduler.log
 
   private val loopCounter: Ref[IO, Long] = Ref.unsafe[IO, Long](0L)
-
-  val mainLoop: Stream[IO, Unit] =
-    Stream
-      .awakeEvery[IO](cfg.idleSleepMs.millis)
-      .evalMap { _ =>
-        for
-          _ <- heartbeat()
-          _ <- processIngest()
-          _ <- recoverStaleBatches()
-          _ <- dispatchBatches()
-          _ <- shadowAudit()
-          _ <- loopCounter.update(_ + 1)
-        yield ()
-      }
+  private val lastShadowAuditMs: Ref[IO, Long] = Ref.unsafe[IO, Long](0L)
 
   private val knownTables: List[String] = List(
     "proxy_events",
@@ -50,30 +46,136 @@ class CronScheduler(
   val schemaRefresher: Stream[IO, Unit] =
     schemaIntrospector.startRefresher(knownTables)
 
+  val mainLoop: Stream[IO, Unit] =
+    val backpressureStream = Stream
+      .awakeEvery[IO](cfg.idleSleepMs.millis)
+      .evalMap { _ =>
+        backpressureService.checkAndAct.void.handleErrorWith { err =>
+          IO(log.error("event=cron_backpressure status=failed error=\"{}\"", sanitize(err.getMessage)))
+        }
+      }
+
+    val ingestStream = Stream
+      .awakeEvery[IO](cfg.idleSleepMs.millis)
+      .evalMap { _ =>
+        processIngest().handleErrorWith { err =>
+          IO(log.error("event=cron_ingest status=failed error=\"{}\"", sanitize(err.getMessage)))
+        }
+      }
+
+    val recoverAndDispatchStream = Stream
+      .awakeEvery[IO](cfg.idleSleepMs.millis)
+      .evalMap { _ =>
+        (recoverStaleBatches() >> dispatchBatches()).handleErrorWith { err =>
+          IO(log.error("event=cron_dispatch status=failed error=\"{}\"", sanitize(err.getMessage)))
+        }
+      }
+
+    val shadowAuditStream = Stream
+      .awakeEvery[IO](10.seconds)
+      .evalMap { _ =>
+        shadowAudit().handleErrorWith { err =>
+          IO(log.error("event=cron_shadow_audit status=failed error=\"{}\"", sanitize(err.getMessage)))
+        }
+      }
+
+    val metricsStream = Stream
+      .awakeEvery[IO](cfg.heartbeatLogIntervalMs.millis)
+      .evalMap { _ =>
+        (metrics.heartbeat() >> IO(metrics.incrementLoopCounter()) >> loopCounter.update(_ + 1))
+          .handleErrorWith { err =>
+            IO(log.error("event=cron_metrics status=failed error=\"{}\"", sanitize(err.getMessage)))
+          }
+      }
+
+    backpressureStream
+      .merge(ingestStream)
+      .merge(recoverAndDispatchStream)
+      .merge(shadowAuditStream)
+      .merge(metricsStream)
+
   private def processIngest(): IO[Unit] =
-    sql"""SELECT COUNT(*) FROM proxy_events WHERE 1=1"""
-      .query[Long]
-      .unique
-      .transact(xa)
-      .flatMap { count =>
-        IO(log.trace("event=cron_ingest status=ok pending_count={}", count))
-      }
-      .handleErrorWith { err =>
-        IO(log.warn("event=cron_ingest status=failed error=\"{}\"", sanitize(err.getMessage)))
-      }
+    val budget = backpressureService.budget
+
+    repo.pendingLedgerCount().flatMap {
+      case Left(err) =>
+        IO(log.warn("event=ingest_ledger status=pending_count_failed operation={} error=\"{}\"",
+          err.operation, sanitize(err.message))) *>
+          IO(metrics.recordIngestInvocation(false))
+
+      case Right(pendingCount) =>
+        val logPending = IO(log.info("event=ingest_ledger status=pending count={}", pendingCount))
+        val throttleCheck = if pendingCount >= budget then
+          IO(log.info("event=backpressure status=throttled pending_count={} budget={} ingest_batch_size={}",
+            pendingCount, budget, cfg.ingestBatchSize))
+        else IO.unit
+
+        logPending *> throttleCheck *>
+          repo.processIngestLedger(
+            ingestConfig.streamNames,
+            ingestConfig.loadStreamNames,
+            cfg.scanMaxAttempts,
+            cfg.scanRetryBackoffSeconds,
+            cfg.ingestBatchSize
+          ).flatMap {
+            case Left(err) =>
+              IO(log.error("event=ingest_ledger status=failed operation={} error=\"{}\"",
+                err.operation, sanitize(err.message))) *>
+                IO(metrics.recordIngestInvocation(false))
+
+            case Right(processed) =>
+              IO(metrics.recordIngestInvocation(true)) *>
+                IO(metrics.recordIngestProcessed(processed)) *>
+                IO.whenA(processed > 0)(
+                  IO(log.info("event=ingest_ledger status=processed count={}", processed))
+                )
+          }
+    }
 
   private def recoverStaleBatches(): IO[Unit] =
-    IO.unit
+    repo.recoverStaleDispatchedBatches(
+      ingestConfig.loadStreamNames,
+      cfg.batchDispatchLeaseSeconds,
+      cfg.batchMaxAttempts
+    ).flatMap {
+      case Left(err) =>
+        IO(log.error("event=stale_batch_recovery status=failed operation={} error=\"{}\"",
+          err.operation, sanitize(err.message)))
+      case Right(count) =>
+        IO.whenA(count > 0)(
+          IO(log.info("event=stale_batch_recovery status=recovered count={}", count))
+        )
+    }
 
   private def dispatchBatches(): IO[Unit] =
-    IO.unit
+    dbSemaphore.available.flatMap { available =>
+      val concurrency = (cfg.dispatchBatchSize min available.toInt).max(1)
+      (1 to cfg.dispatchBatchSize).toList.parTraverseN(concurrency) { _ =>
+        dbSemaphore.permit.use { _ =>
+          batchDispatchService.dispatchNext().void
+        }
+      }.void
+    }
 
   private def shadowAudit(): IO[Unit] =
-    IO.unit
+    val intervalMs = 10_000L
 
-  private def heartbeat(): IO[Unit] =
-    loopCounter.get.flatMap { count =>
-      IO(log.info("event=cron_heartbeat status=running loop_count={}", count))
+    lastShadowAuditMs.get.flatMap { lastMs =>
+      val now = System.currentTimeMillis()
+      if now - lastMs < intervalMs then IO.unit
+      else
+        repo.generateShadowAlerts().flatMap {
+          case Left(err) =>
+            IO(log.error("event=shadow_audit status=failed operation={} error=\"{}\"",
+              err.operation, sanitize(err.message))) *>
+              lastShadowAuditMs.set(now)
+
+          case Right(alerts) =>
+            IO.whenA(alerts.nonEmpty)(
+              IO(log.info("event=shadow_audit status=alerts_generated count={} result=\"{}\"",
+                alerts.size, alerts))
+            ) *> lastShadowAuditMs.set(now)
+        }
     }
 
   private def sanitize(msg: String): String =

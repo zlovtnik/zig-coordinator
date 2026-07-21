@@ -1,0 +1,140 @@
+package com.sslproxy.coordinator.ingest
+
+import cats.effect.IO
+import cats.syntax.all.*
+import com.sslproxy.coordinator.config.KafkaCfg
+import com.sslproxy.coordinator.domain.{PayloadAudit, ScanRequestRecord}
+import com.sslproxy.coordinator.observability.CoordinatorMetrics
+import com.sslproxy.coordinator.tidb.TidbRepository
+import com.sslproxy.coordinator.util.Sha256Utils
+import fs2.Stream
+import fs2.kafka.*
+import io.circe.Json
+import io.circe.parser as circeParser
+import org.slf4j.LoggerFactory
+
+import java.nio.charset.StandardCharsets
+import java.util.Base64
+import scala.concurrent.duration.*
+
+object PayloadAuditConsumer:
+  private val log = LoggerFactory.getLogger(getClass)
+  private val StreamName = "proxy.payload_audit"
+
+  def stream(
+      cfg: KafkaCfg,
+      repo: TidbRepository,
+      metrics: CoordinatorMetrics,
+      dlqProducer: KafkaProducer[IO, String, String]
+  ): Stream[IO, Unit] =
+    val consumerSettings = ConsumerSettings[IO, String, String]
+      .withBootstrapServers(cfg.bootstrapServers)
+      .withGroupId(cfg.payloadAuditConsumer)
+      .withAutoOffsetReset(AutoOffsetReset.Earliest)
+      .withMaxPollRecords(cfg.maxPollRecords)
+      .withProperties(
+        "allow.auto.create.topics" -> "false",
+        "session.timeout.ms" -> "30000",
+        "heartbeat.interval.ms" -> "3000"
+      )
+
+    Stream
+      .resource(KafkaConsumer.resource(consumerSettings))
+      .flatMap { consumer =>
+        Stream.eval(consumer.subscribeTo(cfg.payloadAuditTopic)) >>
+          consumer.stream
+            .map(committable => (translateRecord(committable.record), committable.offset))
+            .through(batchWrite(repo, dlqProducer, cfg, metrics))
+            .through(commitBatch)
+      }
+
+  private[ingest] def translateRecord(
+      record: ConsumerRecord[String, String]
+  ): Either[PayloadAuditError, ScanRequestRecord] =
+    val rawJson = record.value
+    if rawJson == null || rawJson.isEmpty then
+      Left(PayloadAuditError.EmptyMessage)
+    else
+      PayloadAudit.parse(rawJson) match
+        case Left(err) =>
+          Left(PayloadAuditError.InvalidPayload(rawJson, err.getMessage))
+        case Right(audit) =>
+          val payloadBytes = rawJson.getBytes(StandardCharsets.UTF_8)
+          val payloadSha256 = Sha256Utils.sha256Hex(payloadBytes)
+          val dedupeKey = Sha256Utils.sha256Hex(s"$StreamName:$payloadSha256")
+          val payloadRef = s"inline://json/${Base64.getUrlEncoder.withoutPadding.encodeToString(payloadBytes)}"
+
+          import io.circe.Json
+          val requestJson = Json.obj(
+            "stream_name" -> Json.fromString(StreamName),
+            "dedupe_key" -> Json.fromString(dedupeKey),
+            "payload_ref" -> Json.fromString(payloadRef),
+            "observed_at" -> Json.fromString(audit.observedAt)
+          ).noSpaces
+
+          log.trace("event=payload_audit_ingest status=received payload_bytes={}",
+            payloadBytes.length: Integer)
+
+          Right(ScanRequestRecord(requestJson, rawJson, payloadSha256, StreamName, dedupeKey, audit.observedAt))
+
+  private def batchWrite(
+      repo: TidbRepository,
+      dlqProducer: KafkaProducer[IO, String, String],
+      cfg: KafkaCfg,
+      metrics: CoordinatorMetrics
+  ): fs2.Pipe[IO, (Either[PayloadAuditError, ScanRequestRecord], CommittableOffset[IO]), CommittableOffset[IO]] =
+    _.groupWithin(cfg.maxPollRecords, 1.second)
+      .evalTap { chunk =>
+        val validRecords = chunk.collect { case (Right(r), _) => r }.toList
+        val invalidBatch = chunk.collect { case (Left(e), _) => e }.toList
+
+        val dlqAction = invalidBatch.traverse_ { err =>
+          publishDlq(dlqProducer, cfg, err)
+        }
+
+        val writeAction = if validRecords.nonEmpty then
+          repo.recordScanRequests(validRecords).flatMap {
+            case Right(count) =>
+              IO(metrics.recordPayloadAuditIngested(count))
+            case Left(dbErr) =>
+              IO(log.error("event=payload_audit_ingest status=failed operation={} error=\"{}\"",
+                dbErr.operation, sanitize(dbErr.message))) *>
+                IO.raiseError(new RuntimeException(
+                  s"${dbErr.operation}: ${dbErr.message}", dbErr.cause))
+          }
+        else IO.unit
+
+        dlqAction *> writeAction
+      }
+      .flatMap { chunk =>
+        Stream.emits(chunk.map(_._2).toList)
+      }
+
+  private def commitBatch: fs2.Pipe[IO, CommittableOffset[IO], Unit] =
+    _.groupWithin(500, 15.seconds)
+      .evalMap(CommittableOffsetBatch.fromFoldable(_).commit)
+
+  private def publishDlq(
+      dlqProducer: KafkaProducer[IO, String, String],
+      cfg: KafkaCfg,
+      err: PayloadAuditError
+  ): IO[Unit] =
+    err match
+      case PayloadAuditError.EmptyMessage => IO.unit
+      case PayloadAuditError.InvalidPayload(rawJson, errorMsg) =>
+        val dlqTopic = cfg.payloadAuditTopic + cfg.dlqSuffix
+        val original = circeParser.parse(rawJson).getOrElse(Json.fromString(rawJson))
+        val dlqValue = Json.obj(
+          "original" -> original,
+          "error" -> Json.fromString(sanitize(errorMsg))
+        ).noSpaces
+        val record = ProducerRecord(dlqTopic, null, dlqValue)
+        dlqProducer.produce(ProducerRecords.one(record)).flatten.void
+
+  private def sanitize(msg: String): String =
+    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
+
+sealed trait PayloadAuditError
+object PayloadAuditError:
+  case object EmptyMessage extends PayloadAuditError
+  final case class InvalidPayload(rawJson: String, error: String) extends PayloadAuditError

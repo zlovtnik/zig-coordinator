@@ -50,6 +50,7 @@ val circeVersion = "0.14.14"
 val doobieVersion = "1.0.0-RC10"
 val http4sVersion = "0.23.34"
 val mysqlJdbcVersion = "9.2.0"
+
 val hikariCpVersion = "6.2.1"
 val log4CatsVersion = "2.8.0"
 val slf4jVersion = "2.0.18"
@@ -59,7 +60,7 @@ val testcontainersVersion = "1.20.6"
 
 lazy val root = (project in file("."))
   .settings(
-    name := "zig-coordinator",
+    name := "octopus",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-effect" % catsEffectVersion,
       "co.fs2" %% "fs2-core" % fs2Version,
@@ -99,7 +100,7 @@ lazy val root = (project in file("."))
       "-Werror"
     ),
     Compile / mainClass := Some("com.sslproxy.coordinator.Main"),
-    assembly / assemblyJarName := "zig-coordinator.jar",
+    assembly / assemblyJarName := "octopus.jar",
     assembly / mainClass := Some("com.sslproxy.coordinator.Main"),
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "services", xs @ _*) => MergeStrategy.concat

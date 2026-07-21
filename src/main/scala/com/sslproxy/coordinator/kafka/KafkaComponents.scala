@@ -24,7 +24,7 @@ object KafkaComponents:
   private def createConsumer(cfg: KafkaCfg): Resource[IO, KafkaConsumer[IO, String, String]] =
     val consumerSettings = ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
-      .withGroupId(cfg.consumerGroup)
+      .withGroupId(cfg.loadConsumer + "-tidb-load")
       .withAutoOffsetReset(AutoOffsetReset.Earliest)
       .withMaxPollRecords(cfg.maxPollRecords)
       .withProperties(

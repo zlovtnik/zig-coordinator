@@ -6,9 +6,12 @@ final case class AppConfig(
     tidb: TiDbConfig,
     kafka: KafkaCfg,
     cron: CronConfig,
+    ingest: IngestConfig,
+    backpressure: BackpressureConfig,
     systemRegistry: SystemRegistryConfig,
     http: HttpConfig,
-    sync: SyncConfig
+    sync: SyncConfig,
+    wireless: WirelessConfig
 ) derives ConfigReader
 
 final case class TiDbConfig(
@@ -29,22 +32,41 @@ final case class KafkaCfg(
     bootstrapServers: String,
     loadTopic: String,
     resultTopic: String,
+    scanTopic: String,
+    payloadAuditTopic: String,
     dlqSuffix: String,
-    consumerGroup: String,
+    scanConsumer: String,
+    resultConsumer: String,
+    payloadAuditConsumer: String,
+    loadConsumer: String,
     maxPollRecords: Int,
     pollTimeoutMs: Long
 ) derives ConfigReader
 
 final case class CronConfig(
     idleSleepMs: Int,
+    idleSleepBackoffMs: Int,
     dispatchBatchSize: Int,
     ingestBatchSize: Int,
     scanMaxAttempts: Int,
     scanRetryBackoffSeconds: Int,
     batchDispatchLeaseSeconds: Int,
     batchMaxAttempts: Int,
-    heartbeatIntervalMs: Int,
-    schemaRefreshIntervalSeconds: Int
+    heartbeatLogIntervalMs: Int,
+    schemaRefreshIntervalSeconds: Int,
+    scanFetchCount: Int,
+    resultFetchCount: Int
+) derives ConfigReader
+
+final case class IngestConfig(
+    streamNames: List[String],
+    loadStreamNames: List[String]
+) derives ConfigReader
+
+final case class BackpressureConfig(
+    budgetMultiplier: Int,
+    adaptivePullChangeThreshold: Int,
+    adaptivePullMinRestartIntervalMs: Int
 ) derives ConfigReader
 
 final case class SystemRegistryConfig(
