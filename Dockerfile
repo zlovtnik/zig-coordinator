@@ -15,11 +15,9 @@ RUN apk add --no-cache bash curl tar \
     && ln -s /opt/sbt/bin/sbt /usr/local/bin/sbt \
     && rm /tmp/sbt.tgz
 
-ENV SBT_NATIVE_CLIENT=false
-
 WORKDIR /app
 COPY services/octopus/ ./
-RUN sbt assembly
+RUN sbt --server assembly
 
 # ---- Stage 2: Runtime with Azul Zulu JRE 21 (Alpine) ----
 FROM azul/zulu-openjdk-alpine:21-jre
