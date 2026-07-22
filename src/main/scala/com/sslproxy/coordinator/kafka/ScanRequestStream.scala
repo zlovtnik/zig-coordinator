@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.cutover.VerifiedCutoverArtifact
+import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.domain.ScanRequestRecord
 import com.sslproxy.coordinator.tidb.TidbRepository
 import fs2.Stream
@@ -18,7 +18,9 @@ object ScanRequestStream:
       repo: TidbRepository,
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact) { locked =>
+    LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact,
+      repo.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).map(_.fold(_ => Set.empty[CutoffKey], identity))
+    ) { locked =>
       for
         request <- IO.fromEither(ScanRequestRecord.decodeWire(locked.record.value))
         decision <- dbSemaphore.permit.use { _ =>

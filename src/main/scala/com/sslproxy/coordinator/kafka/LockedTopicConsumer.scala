@@ -61,11 +61,12 @@ private[kafka] object LockedTopicConsumer:
       cfg: KafkaCfg,
       groupId: String,
       topic: String,
-      artifact: VerifiedCutoverArtifact
+      artifact: VerifiedCutoverArtifact,
+      bootstrapped: IO[Set[CutoffKey]] = IO.pure(Set.empty)
   )(
       process: LockedBrokerRecord => IO[Unit]
   ): Stream[IO, Unit] =
-    Stream.eval(Ref.of[IO, CutoverOffsetGuardState](CutoverOffsetGuardState.empty)).flatMap { guard =>
+    Stream.eval(bootstrapped.flatMap(keys => Ref.of[IO, CutoverOffsetGuardState](CutoverOffsetGuardState(keys)))).flatMap { guard =>
       Stream
         .resource(KafkaConsumer.resource(KafkaComponents.consumerSettings(cfg, groupId)))
         .flatMap { consumer =>

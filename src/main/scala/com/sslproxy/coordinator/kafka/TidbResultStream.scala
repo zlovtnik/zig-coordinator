@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.kafka
 import cats.effect.IO
 import cats.effect.std.Semaphore
 import com.sslproxy.coordinator.config.KafkaCfg
-import com.sslproxy.coordinator.cutover.VerifiedCutoverArtifact
+import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.tidb.TidbRepository
 import fs2.Stream
 import org.slf4j.LoggerFactory
@@ -17,7 +17,9 @@ object TidbResultStream:
       repo: TidbRepository,
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
-    LockedTopicConsumer.stream(cfg, cfg.resultConsumer, cfg.resultTopic, artifact) { locked =>
+    LockedTopicConsumer.stream(cfg, cfg.resultConsumer, cfg.resultTopic, artifact,
+      repo.loadConsumerOffsets(cfg.resultConsumer, cfg.resultTopic).map(_.fold(_ => Set.empty[CutoffKey], identity))
+    ) { locked =>
       for
         result <- IO.fromEither(KafkaComponents.deserializeResult(locked.record.value))
         _ <- dbSemaphore.permit.use { _ =>

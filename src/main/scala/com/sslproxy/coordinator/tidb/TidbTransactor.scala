@@ -616,16 +616,18 @@ object TidbTransactor:
       hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
       hikariConfig.addDataSourceProperty("connectionTimeZone", "UTC")
       hikariConfig.addDataSourceProperty("forceConnectionTimeZoneToSession", "true")
-      val tlsMaterial = TidbTls.configure(hikariConfig, config)
+      val tlsMaterial =
+        if config.sslMode == "DISABLED" then None
+        else Some(TidbTls.configure(hikariConfig, config))
 
       try
         val ds = new HikariDataSource(hikariConfig)
         log.info("TidbTransactor: HikariCP pool allocated to {}:{}/{}",
           config.host, config.port, config.database)
-        new TidbTransactor(ds, config, Some(tlsMaterial))
+        new TidbTransactor(ds, config, tlsMaterial)
       catch
         case error: Throwable =>
-          tlsMaterial.delete()
+          tlsMaterial.foreach(_.delete())
           throw error
     }
 

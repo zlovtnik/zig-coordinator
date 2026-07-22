@@ -18,8 +18,8 @@ final case class BrokerRecordMetadata(
 enum IngestionDisposition(val databaseValue: String):
   case Processed extends IngestionDisposition("processed")
   case Deduplicated extends IngestionDisposition("duplicate")
-  case Retrying extends IngestionDisposition("failed")
-  case Parked extends IngestionDisposition("failed")
+  case Retrying extends IngestionDisposition("retrying")
+  case Parked extends IngestionDisposition("parked")
 
 final case class IngestionDecision(
     disposition: IngestionDisposition,

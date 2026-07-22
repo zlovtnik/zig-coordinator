@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.effect.implicits.*
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
+import com.sslproxy.coordinator.cutover.CutoffKey
 import com.sslproxy.coordinator.domain.{BrokerRecordMetadata, DatabaseError, IngestionDecision, IngestionDisposition, ScanRequestRecord, SyncLoad}
 import doobie.*
 import doobie.implicits.*
@@ -28,6 +29,18 @@ class TidbRepository(xa: Transactor[IO]):
             WHERE status IN ('pending', 'processing')"""
         .query[Long]
         .unique
+    }
+
+  def loadConsumerOffsets(
+      groupId: String,
+      topic: String
+  ): IO[Either[DatabaseError, Set[CutoffKey]]] =
+    runDb("tidb.load_consumer_offsets") {
+      sql"""SELECT partition_id FROM consumer_offsets
+            WHERE group_id = $groupId AND topic = $topic"""
+        .query[Int].to[List].map { partitions =>
+          partitions.map(p => CutoffKey(groupId, topic, p)).toSet
+        }
     }
 
   def processIngestLedger(
@@ -76,12 +89,14 @@ class TidbRepository(xa: Transactor[IO]):
                FROM sync_events e
                JOIN sync_jobs j
                  ON j.stream_name = e.stream_name AND j.dedupe_key = e.dedupe_key
-               LEFT JOIN sync_cursors c ON c.stream_name = e.stream_name
-               WHERE e.status IN ('pending', 'failed')
-                 AND e.stream_name IN (""" ++ streamClause ++ fr""" )
-               ORDER BY e.observed_at, e.stream_name, e.dedupe_key
-               LIMIT $limit
-               ON DUPLICATE KEY UPDATE batch_id = sync_batches.batch_id"""
+                LEFT JOIN sync_cursors c ON c.stream_name = e.stream_name
+                WHERE e.status IN ('pending', 'failed')
+                  AND e.stream_name IN (""" ++ streamClause ++ fr""" )
+                  AND e.attempt_count < $maxAttempts
+                  AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSecs, CURRENT_TIMESTAMP(6)))
+                ORDER BY e.observed_at, e.stream_name, e.dedupe_key
+                LIMIT $limit
+                ON DUPLICATE KEY UPDATE batch_id = sync_batches.batch_id"""
 
         val insertOutbox =
           if loadStreamNames.isEmpty then 0.pure[ConnectionIO]
@@ -123,6 +138,8 @@ class TidbRepository(xa: Transactor[IO]):
                                   e.updated_at = CURRENT_TIMESTAMP(6)
                               WHERE e.status IN ('pending', 'failed')
                                 AND e.stream_name IN (""" ++ streamClause ++ fr""" )
+                                AND e.attempt_count < $maxAttempts
+                                AND (e.status = 'pending' OR e.updated_at <= TIMESTAMPADD(SECOND, -$backoffSecs, CURRENT_TIMESTAMP(6)))
                                 AND EXISTS (
                                   SELECT 1 FROM sync_batches b
                                   WHERE b.stream_name = e.stream_name

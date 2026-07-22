@@ -84,17 +84,7 @@ final case class SystemRegistryConfig(
 
 final case class HttpConfig(
     port: Int
-)
-
-object HttpConfig:
-  given ConfigReader[HttpConfig] =
-    ConfigReader[Int].emap { port =>
-      if port < 0 || port > 65535 then
-        Left(pureconfig.error.CannotConvert(port.toString, "Int",
-          s"Port must be between 0 and 65535, got $port"))
-      else
-        Right(HttpConfig(port))
-    }
+) derives ConfigReader
 
 final case class SyncConfig(
     outboxDir: String

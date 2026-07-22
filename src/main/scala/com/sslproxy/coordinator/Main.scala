@@ -7,7 +7,7 @@ import com.comcast.ip4s.*
 import fs2.Stream
 import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.cron.CronScheduler
-import com.sslproxy.coordinator.cutover.{CutoverArtifactLoader, VerifiedCutoverArtifact}
+import com.sslproxy.coordinator.cutover.CutoverArtifactLoader
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.http.HealthRoutes
 import com.sslproxy.coordinator.ingest.PayloadAuditConsumer
@@ -16,7 +16,6 @@ import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.sink.*
 import com.sslproxy.coordinator.tidb.*
 import doobie.Transactor
-import fs2.kafka.*
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.http4s.ember.server.EmberServerBuilder
 import org.slf4j.LoggerFactory
@@ -65,15 +64,6 @@ object Main extends IOApp.Simple:
                   Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
                     val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
                     val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
-
-                    val genericSink = new GenericTiDbSink(tiDbDoobieTx)
-                    val registry = new SystemRegistry(cfg.systemRegistry)
-
-                    val sinkPipe = new SinkPipe(genericSink, schemaIntrospector, registry, dl =>
-                      val dlqTopic = cfg.kafka.loadTopic + cfg.kafka.dlqSuffix
-                      val record = ProducerRecord(dlqTopic, dl.table, dl.toDlqJson)
-                      kafka.producer.produce(ProducerRecords.one(record)).flatten.void
-                    )
 
                     val backpressureService = new BackpressureService(
                       cfg.backpressure, cfg.cron.ingestBatchSize,
