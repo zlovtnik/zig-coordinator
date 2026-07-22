@@ -7,7 +7,7 @@
 FROM azul/zulu-openjdk-alpine:21 AS builder
 
 # Install sbt
-ARG SBT_VERSION=2.0.0-M4
+ARG SBT_VERSION=1.12.14
 RUN apk add --no-cache bash curl tar \
     && curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" \
       -o /tmp/sbt.tgz \
