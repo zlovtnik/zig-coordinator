@@ -1,7 +1,23 @@
 package com.sslproxy.coordinator.config
 
 import cats.data.NonEmptyList
-import pureconfig.ConfigReader
+import pureconfig.{ConfigReader, ConfigCursor}
+import pureconfig.error.ConfigReaderFailures
+import com.sslproxy.coordinator.config.StringListConfigReader.given
+
+object StringListConfigReader:
+  given ConfigReader[List[String]] with
+    def from(cursor: ConfigCursor): Either[ConfigReaderFailures, List[String]] =
+      cursor.asList match
+        case Right(cursors) =>
+          cursors.foldRight(Right(Nil): Either[ConfigReaderFailures, List[String]]) { (c, acc) =>
+            for
+              s   <- c.asString
+              tail <- acc
+            yield s :: tail
+          }
+        case Left(_) =>
+          cursor.asString.map(s => s.split(",").map(_.trim).filter(_.nonEmpty).toList)
 
 final case class AppConfig(
     tidb: TiDbConfig,
