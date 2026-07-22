@@ -1,24 +1,23 @@
 # Octopus
 
-A **state-machine loop** that orchestrates the sync plane between Rust proxy servers, PostgreSQL, Redpanda (Kafka-compatible event streaming), MinIO (S3-compatible object storage), and optionally TiDB.
+A durable ingestion coordinator that consumes events from Kafka, transforms raw JSON into typed database rows, and persists to TiDB. Built with Scala 3, Cats Effect, FS2, Doobie, and fs2-kafka.
 
-This service is the Scala 3 coordinator for the SSL proxy sync plane. Built with Cats Effect 3, FS2, Doobie, http4s, fs2-kafka, and Circe, it brings functional, type-safe streaming to the coordinator role.
+Octopus is the sole owner of durable ingestion state in TiDB for the four-domain system (proxy, wireless, audit, alerts).
 
 ---
 
-## What It Solves
+## What It Does
 
-The coordinator is the central orchestrator for SSL proxy sync events. It:
+The coordinator is the durable ingestion owner for the four-domain system:
 
-- **Ingests scan requests** from Redpanda (`sync.scan.request`) — proxy events that describe TLS/SSL scans — and records them in PostgreSQL.
-- **Manages batch lifecycle** — moves events through a state machine (`pending → processing → batched → dispatched → completed/failed`) using stored procedures in the `coordinator` PostgreSQL schema.
-- **Dispatches batches** to TiDB worker processes via `sync.oracle.load` and handles their results from `sync.oracle.result`.
+- **Ingests events** from Redpanda (`sync.scan.request`) — scan requests, proxy payloads, wireless probes — and records them in TiDB.
+- **Manages batch lifecycle** — moves events through a state machine (`pending → batched → dispatched → completed/failed`) with idempotent, deduplicated writes.
+- **Transforms payloads** — converts raw JSON into typed database rows with field validation, alias resolution, and type coercion (10 target schemas).
+- **Dispatches batches** to TiDB workers via `sync.oracle.load` and handles their results from `sync.oracle.result`.
 - **Handles wireless operations** — 7 independent request/reply and fire-and-forget handlers for wireless sensor data (backlog management, MAC address lookup, authorized networks, probe flush).
-- **Applies backpressure** — suspends scan consumption when the pending ledger exceeds a configurable budget (`ingest_batch_size × 4`).
-- **Adaptively tunes pull windows** — shrinks Kafka `maxPollRecords` when the database falls behind.
-- **Archives raw payloads** to MinIO and prunes expired data from PostgreSQL.
-- **Generates shadow device alerts** at a rate-limited interval.
-- **Exposes health, metrics, and tracing** via http4s health endpoint and OpenTelemetry.
+- **Applies backpressure** — suspends scan consumption when the pending ledger exceeds a configurable budget.
+- **Generates shadow device alerts** — detects wireless MACs with strong signal but no proxy presence.
+- **Exposes health and metrics** via http4s endpoint and OpenTelemetry.
 
 ---
 
@@ -32,7 +31,7 @@ cron:coordinator-loop
   ├─ adaptivePull          Shrink Kafka fetch size when DB is behind
   ├─ backpressureV2        Suspend scan consumer when pending count ≥ budget
   ├─ processScanRequests   Delegate to scan request consumer
-  ├─ processIngest         Call process_ingest_ledger() stored procedure
+  ├─ processIngest         Promote pending events → jobs → batches
   ├─ recoverStaleBatches   Recover dispatched-but-stale batches
   ├─ dispatchBatches       Get next batch → publish to sync.oracle.load
   ├─ handleResults         Delegate to result consumer
@@ -43,7 +42,7 @@ cron:coordinator-loop
 
 **Independent FS2 Kafka consumer streams** (not in the main loop):
 
-- Scan request consumer — consumes `sync.scan.request`, accumulates into batches, flushes to PostgreSQL
+- Scan request consumer — consumes `sync.scan.request`, accumulates into batches, flushes to TiDB
 - Result consumer — consumes `sync.oracle.result`, accumulates into batches, calls `process_batch_results()`
 - TiDB load consumer — consumes `sync.oracle.load`, performs TiDB sink operations, publishes results to `sync.oracle.result`
 - Wireless handlers — 7 independent consumer streams for wireless operations
@@ -51,7 +50,7 @@ cron:coordinator-loop
 **Timer-based background streams**:
 
 - `wireless-payload-archive` — periodically archives old wireless payloads to MinIO
-- `retention-prune` — periodically prunes expired events and tombstones from PostgreSQL
+- `retention-prune` — periodically prunes expired events and tombstones from TiDB
 - Scan request flush timer — flushes partial scan record batches every 1 second
 - Result flush timer — flushes partial result batches every 1 second
 
@@ -155,9 +154,9 @@ Request/reply handlers parse an optional `reply_topic` field from the incoming J
 
 ---
 
-## TiDB Sink
+## TiDB Integration
 
-The optional TiDB sink (`tidb-sink.enabled=false` by default) provides JDBC-based TiDB/MySQL integration:
+The coordinator connects to TiDB via JDBC:
 
 - **TLS authentication** using standard MySQL TLS or password auth.
 - **Schema validation** with optional `warn-only` mode for graceful degradation.
@@ -165,7 +164,7 @@ The optional TiDB sink (`tidb-sink.enabled=false` by default) provides JDBC-base
 - **Configurable connection pool**.
 - **Health check** via the http4s health endpoint.
 
-When enabled, the TiDB load consumer reads from `sync.oracle.load`, performs the TiDB load operation, and publishes the result to `sync.oracle.result`.
+TiDB is required for runtime operation (`tidb.enabled=true`).
 
 ---
 
@@ -181,11 +180,10 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `SYNC_STREAM_NAMES` | (see reference.conf) | Comma-separated list of all stream names |
 | `SYNC_TIDB_STREAM_NAMES` | (see reference.conf) | Stream names dispatched to TiDB |
 | `SYNC_REDPANDA_BOOTSTRAP_SERVERS` | `localhost:9092` | Redpanda/Kafka bootstrap servers |
-| `DATABASE_URL` | `jdbc:postgresql://localhost:5432/sync` | PostgreSQL JDBC URL |
-| `POSTGRES_USER` | `sync` | PostgreSQL username |
-| `POSTGRES_PASSWORD` | *(required)* | PostgreSQL password |
-| `COORDINATOR_DB_POOL` | `35` | Doobie connection pool size |
-| `COORDINATOR_DB_POOL_MIN_IDLE` | `10` | Minimum idle connections |
+| `TIDB_JDBC_URL` | `jdbc:mysql://localhost:3306/coordinator` | TiDB/MySQL JDBC URL |
+| `TIDB_USER` | `root` | TiDB username |
+| `TIDB_PASSWORD` | *(required)* | TiDB password |
+| `TIDB_CONNECTION_POOL_SIZE` | `8` | Doobie connection pool size |
 
 ### Redpanda Topics
 
@@ -253,18 +251,17 @@ The coordinator is configured exclusively through environment variables, loaded 
 | `MINIO_ACCESS_KEY_ID` | *(required when archive enabled)* | MinIO access key |
 | `MINIO_SECRET_ACCESS_KEY` | *(required when archive enabled)* | MinIO secret key |
 
-### TiDB Sink
+### TiDB
 
 | Variable | Default | Description |
 |---|---|---|
-| `TIDB_SINK_ENABLED` | `false` | Enable TiDB sink |
-| `TIDB_SINK_WIRELESS_ENABLED` | `true` | Enable wireless TiDB objects |
-| `TIDB_SINK_SCHEMA_VALIDATION_WARN_ONLY` | `false` | Schema validation mode |
-| `TIDB_JDBC_URL` | *(required when enabled)* | TiDB/MySQL JDBC URL |
-| `TIDB_USER` | *(required when enabled)* | TiDB username |
-| `TIDB_PASSWORD` | *(required when enabled)* | TiDB password |
+| `TIDB_ENABLED` | `false` | Enable TiDB (required for runtime) |
+| `TIDB_JDBC_URL` | *(required)* | TiDB/MySQL JDBC URL |
+| `TIDB_USER` | *(required)* | TiDB username |
+| `TIDB_PASSWORD` | *(required)* | TiDB password |
 | `TIDB_CONNECTION_POOL_SIZE` | `8` | Connection pool size |
 | `TIDB_LOAD_MAX_RETRIES` | `3` | Max retries for TiDB load |
+| `TIDB_SCHEMA_VALIDATION_WARN_ONLY` | `false` | Schema validation mode |
 
 ### Observability
 
@@ -309,13 +306,13 @@ Tests include:
 ### Local Development
 
 ```sh
-# Start dependencies (PostgreSQL, Redpanda, MinIO)
-docker compose up -d postgres redpanda minio
+# Start dependencies (TiDB, Redpanda, MinIO)
+docker compose up -d tidb redpanda minio
 
 # Set required env vars and run
-export DATABASE_URL=jdbc:postgresql://localhost:5432/sync
-export POSTGRES_USER=sync
-export POSTGRES_PASSWORD=...
+export TIDB_JDBC_URL=jdbc:mysql://localhost:3306/coordinator
+export TIDB_USER=root
+export TIDB_PASSWORD=...
 export SYNC_REDPANDA_BOOTSTRAP_SERVERS=localhost:9092
 export MINIO_ACCESS_KEY_ID=...
 export MINIO_SECRET_ACCESS_KEY=...
@@ -328,9 +325,9 @@ sbt run
 ```sh
 docker run -d \
   -p 8081:8081 \
-  -e DATABASE_URL=jdbc:postgresql://host.docker.internal:5432/sync \
-  -e POSTGRES_USER=sync \
-  -e POSTGRES_PASSWORD=... \
+  -e TIDB_JDBC_URL=jdbc:mysql://host.docker.internal:3306/coordinator \
+  -e TIDB_USER=root \
+  -e TIDB_PASSWORD=... \
   -e SYNC_REDPANDA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \
   ssl-proxy/octopus:latest
 ```
@@ -346,12 +343,12 @@ octopus:
     repository: ssl-proxy/octopus
     tag: latest
   env:
-    DATABASE_URL: jdbc:postgresql://postgres:5432/sync
-    POSTGRES_USER: sync
-    POSTGRES_PASSWORD:
+    TIDB_JDBC_URL: jdbc:mysql://tidb:3306/coordinator
+    TIDB_USER: root
+    TIDB_PASSWORD:
       valueFrom:
         secretKeyRef:
-          name: postgres-credentials
+          name: tidb-credentials
           key: password
     SYNC_REDPANDA_BOOTSTRAP_SERVERS: redpanda:9092
     MINIO_ENDPOINT: http://minio:9000
@@ -463,8 +460,7 @@ OTLP traces are exported to the endpoint configured by `OTEL_EXPORTER_OTLP_ENDPO
 
 ### Health Checks
 
-- PostgreSQL connection validation
-- TiDB connection validation (when enabled)
+- TiDB connection validation
 - Kafka consumer stream health
 
 ---
@@ -494,20 +490,26 @@ services/octopus/
 ├── build.sbt                            # sbt build (Scala 3, Cats Effect, FS2)
 ├── project/
 ├── Dockerfile                           # Multi-stage build
+├── tidb/init/                           # TiDB schema DDL
 ├── src/
 │   ├── main/scala/com/sslproxy/coordinator/
 │   │   ├── Main.scala                   # IOApp entry point
 │   │   ├── config/                      # Pureconfig-backed configuration
-│   │   │   ├── CoordinatorConfig.scala
-│   │   │   └── TiDBSinkConfig.scala
-│   │   ├── postgres/                    # Postgres cursoring, dispatch, result handling
 │   │   ├── tidb/                        # TiDB transforms, checksums, error classification
 │   │   ├── kafka/                       # FS2 Kafka consumer/producer streams
 │   │   ├── cron/                        # Periodic ingest/batch/dispatch scheduler
-│   │   ├── dispatch/                    # Kafka batch dispatch from Postgres backlog
-│   │   └── http/                        # http4s health endpoint
+│   │   ├── dispatch/                    # Kafka batch dispatch, backpressure
+│   │   ├── ingest/                      # Payload audit consumer
+│   │   ├── sink/                        # Generic TiDB sink, schema introspection
+│   │   ├── cutover/                     # Signed cutover artifact verification
+│   │   ├── domain/                      # Domain models
+│   │   ├── errors/                      # Dead letter handling
+│   │   ├── model/                       # System context
+│   │   ├── observability/               # Metrics (Prometheus)
+│   │   ├── processor/                   # Processor supervisor
+│   │   ├── http/                        # http4s health endpoint
+│   │   └── util/                        # SHA-256 utilities
 │   └── test/scala/com/sslproxy/coordinator/
-│       ├── postgres/
 │       ├── tidb/
 │       ├── kafka/
 │       └── cron/
