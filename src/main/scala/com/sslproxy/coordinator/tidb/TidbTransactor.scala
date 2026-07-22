@@ -600,36 +600,57 @@ object TidbTransactor:
     new TidbTransactor(ds, config, None)
 
   private def allocate(config: TiDbConfig): IO[TidbTransactor] =
-    IO.blocking {
-      val hikariConfig = new HikariConfig()
-      hikariConfig.setJdbcUrl(jdbcUrl(config))
-      hikariConfig.setUsername(config.user)
-      hikariConfig.setPassword(config.password)
-      hikariConfig.setMaximumPoolSize(config.poolSize)
-      hikariConfig.setConnectionTimeout(config.connectionTimeoutMs)
-      hikariConfig.setDriverClassName("com.mysql.cj.jdbc.Driver")
-      hikariConfig.setPoolName("tidb-pool")
-      hikariConfig.setAutoCommit(true)
-      hikariConfig.setConnectionTestQuery("SELECT 1")
-      hikariConfig.addDataSourceProperty("cachePrepStmts", "true")
-      hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250")
-      hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
-      hikariConfig.addDataSourceProperty("connectionTimeZone", "UTC")
-      hikariConfig.addDataSourceProperty("forceConnectionTimeZoneToSession", "true")
-      val tlsMaterial =
-        if config.sslMode == "DISABLED" then None
-        else Some(TidbTls.configure(hikariConfig, config))
+    val maxRetries = 10
+    val baseDelay: FiniteDuration = 3.seconds
+    val sanitizeFn = (msg: String) => if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
 
-      try
-        val ds = new HikariDataSource(hikariConfig)
-        log.info("TidbTransactor: HikariCP pool allocated to {}:{}/{}",
-          config.host, config.port, config.database)
-        new TidbTransactor(ds, config, tlsMaterial)
-      catch
-        case error: Throwable =>
-          tlsMaterial.foreach(_.delete())
-          throw error
-    }
+    def tryAllocate: IO[TidbTransactor] =
+      IO.blocking {
+        val hikariConfig = new HikariConfig()
+        hikariConfig.setJdbcUrl(jdbcUrl(config))
+        hikariConfig.setUsername(config.user)
+        hikariConfig.setPassword(config.password)
+        hikariConfig.setMaximumPoolSize(config.poolSize)
+        hikariConfig.setConnectionTimeout(config.connectionTimeoutMs)
+        hikariConfig.setDriverClassName("com.mysql.cj.jdbc.Driver")
+        hikariConfig.setPoolName("tidb-pool")
+        hikariConfig.setAutoCommit(true)
+        hikariConfig.setConnectionTestQuery("SELECT 1")
+        hikariConfig.addDataSourceProperty("cachePrepStmts", "true")
+        hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250")
+        hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
+        hikariConfig.addDataSourceProperty("connectionTimeZone", "UTC")
+        hikariConfig.addDataSourceProperty("forceConnectionTimeZoneToSession", "true")
+        val tlsMaterial =
+          if config.sslMode == "DISABLED" then None
+          else Some(TidbTls.configure(hikariConfig, config))
+
+        try
+          val ds = new HikariDataSource(hikariConfig)
+          log.info("TidbTransactor: HikariCP pool allocated to {}:{}/{}",
+            config.host, config.port, config.database)
+          new TidbTransactor(ds, config, tlsMaterial)
+        catch
+          case error: Throwable =>
+            tlsMaterial.foreach(_.delete())
+            throw error
+      }
+
+    def retryWithBackoff(remaining: Int, lastError: Throwable): IO[TidbTransactor] =
+      if remaining <= 0 then
+        IO.raiseError(new RuntimeException(
+          s"TidbTransactor: failed to allocate pool after $maxRetries attempts", lastError))
+      else
+        tryAllocate.handleErrorWith { error =>
+          val attemptNum = maxRetries - remaining + 1
+          val delay = baseDelay * math.min(attemptNum, 5).toLong
+          log.warn("TidbTransactor: pool allocation attempt {}/{} failed: {} — retrying in {}s",
+            attemptNum.toString, maxRetries.toString, sanitizeFn(error.getMessage),
+            delay.toSeconds.toString)
+          IO.sleep(delay) *> retryWithBackoff(remaining - 1, error)
+        }
+
+    retryWithBackoff(maxRetries, new RuntimeException("no attempts made"))
 
   def jdbcUrl(config: TiDbConfig): String =
     val base = s"jdbc:mysql://${config.host}:${config.port}/${config.database}" +
