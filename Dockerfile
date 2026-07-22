@@ -7,13 +7,15 @@
 FROM azul/zulu-openjdk-alpine:21 AS builder
 
 # Install sbt
-ARG SBT_VERSION=1.11.6
+ARG SBT_VERSION=2.0.3
 RUN apk add --no-cache bash curl tar \
     && curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" \
       -o /tmp/sbt.tgz \
     && tar xzf /tmp/sbt.tgz -C /opt \
     && ln -s /opt/sbt/bin/sbt /usr/local/bin/sbt \
     && rm /tmp/sbt.tgz
+
+ENV SBT_NATIVE_CLIENT=false
 
 WORKDIR /app
 COPY services/octopus/ ./
