@@ -33,7 +33,10 @@ final class ProcessorReadiness private[processor] (
   def statuses: IO[Map[ProcessorId, ProcessorStatus]] = statusesRef.get
 
   def ready: IO[Boolean] =
-    statusesRef.get.map(_.values.forall(_.lifecycle == ProcessorLifecycle.Ready))
+    statusesRef.get.map(_.values.forall { status =>
+      status.lifecycle == ProcessorLifecycle.Ready ||
+      status.lifecycle == ProcessorLifecycle.Disabled
+    })
 
 final class ProcessorSupervisor private (
     config: ProcessorConfig,
