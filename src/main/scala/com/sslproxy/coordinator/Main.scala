@@ -4,12 +4,14 @@ import cats.effect.{IO, IOApp, Resource}
 import cats.effect.kernel.Fiber
 import cats.effect.std.Semaphore
 import com.comcast.ip4s.*
+import fs2.Stream
 import com.sslproxy.coordinator.config.AppConfig
 import com.sslproxy.coordinator.cron.CronScheduler
+import com.sslproxy.coordinator.cutover.{CutoverArtifactLoader, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.dispatch.{BackpressureService, BatchDispatchService}
 import com.sslproxy.coordinator.http.HealthRoutes
 import com.sslproxy.coordinator.ingest.PayloadAuditConsumer
-import com.sslproxy.coordinator.kafka.{ConsumerStream, KafkaComponents, TidbLoadStream, WirelessConsumerService}
+import com.sslproxy.coordinator.kafka.{KafkaComponents, ScanRequestStream, TidbLoadStream, TidbResultStream, WirelessConsumerService}
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.sink.*
 import com.sslproxy.coordinator.tidb.*
@@ -51,75 +53,98 @@ object Main extends IOApp.Simple:
           val tiDbRepo = new TidbRepository(tiDbDoobieTx)
 
           Resource.eval(preflight.validate()).flatMap { _ =>
-            Resource.eval(Semaphore[IO](cfg.tidb.poolSize.toLong)).flatMap { dbSemaphore =>
-              KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
-                Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
-                  val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
-                  val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
+            val artifactIO =
+              if cfg.runtime.consumersEnabled then
+                CutoverArtifactLoader.loadAndVerify[IO](cfg.cutover).map(Some(_))
+              else
+                IO.pure(None)
 
-                  val genericSink = new GenericTiDbSink(tiDbDoobieTx)
-                  val registry = new SystemRegistry(cfg.systemRegistry)
+            Resource.eval(artifactIO).flatMap { artifactOpt =>
+              Resource.eval(Semaphore[IO](cfg.tidb.poolSize.toLong)).flatMap { dbSemaphore =>
+                KafkaComponents.resource(cfg.kafka).flatMap { kafka =>
+                  Resource.eval(SchemaIntrospector(tiDbDoobieTx, cfg.tidb.database, cfg.cron.schemaRefreshIntervalSeconds.seconds)).flatMap { schemaIntrospector =>
+                    val payloadResolver = new TidbPayloadResolver(cfg.sync.outboxDir)
+                    val handler = new TidbLoadHandler(payloadResolver, TidbTransformService, oldTx, TidbClock)
 
-                  val sinkPipe = new SinkPipe(genericSink, schemaIntrospector, registry, dl =>
-                    val dlqTopic = cfg.kafka.loadTopic + cfg.kafka.dlqSuffix
-                    val record = ProducerRecord(dlqTopic, dl.table, dl.toDlqJson)
-                    kafka.producer.produce(ProducerRecords.one(record)).flatten.void
-                  )
+                    val genericSink = new GenericTiDbSink(tiDbDoobieTx)
+                    val registry = new SystemRegistry(cfg.systemRegistry)
 
-                  val backpressureService = new BackpressureService(
-                    cfg.backpressure, cfg.cron.ingestBatchSize,
-                    tiDbRepo.pendingLedgerCount(), metrics
-                  )
-
-                  val batchDispatchService = new BatchDispatchService(
-                    tiDbRepo,
-                    kafka.producer,
-                    metrics,
-                    java.util.UUID.randomUUID().toString,
-                    List(cfg.kafka.loadTopic, cfg.kafka.resultTopic),
-                    cfg.cron.batchDispatchLeaseSeconds,
-                    cfg.cron.scanRetryBackoffSeconds,
-                    cfg.cron.batchDispatchLeaseSeconds
-                  )
-
-                  val cronScheduler = new CronScheduler(
-                    cfg.cron, cfg.ingest, tiDbRepo,
-                    backpressureService, batchDispatchService, metrics,
-                    schemaIntrospector, dbSemaphore
-                  )
-
-                  val healthRoutes = new HealthRoutes(oldTx)
-
-                  val httpPort = Port.fromInt(cfg.http.port).getOrElse(
-                    sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")
-                  )
-                  val serverResource = EmberServerBuilder.default[IO]
-                    .withPort(httpPort)
-                    .withHost(host"0.0.0.0")
-                    .withHttpApp(healthRoutes.routes.orNotFound)
-                    .build
-
-                  serverResource.flatMap { _ =>
-                    val payloadAuditStream = PayloadAuditConsumer.stream(
-                      cfg.kafka, tiDbRepo, metrics, kafka.producer
+                    val sinkPipe = new SinkPipe(genericSink, schemaIntrospector, registry, dl =>
+                      val dlqTopic = cfg.kafka.loadTopic + cfg.kafka.dlqSuffix
+                      val record = ProducerRecord(dlqTopic, dl.table, dl.toDlqJson)
+                      kafka.producer.produce(ProducerRecords.one(record)).flatten.void
                     )
 
-                    val wirelessStreams = WirelessConsumerService.allStreams(
-                      cfg.wireless, cfg.kafka.bootstrapServers, tiDbRepo, kafka.producer
+                    val backpressureService = new BackpressureService(
+                      cfg.backpressure, cfg.cron.ingestBatchSize,
+                      tiDbRepo.pendingLedgerCount(), metrics
                     )
 
-                    val streams =
-                      TidbLoadStream.run(kafka, handler, dbSemaphore)
-                        .merge(ConsumerStream.run(cfg.kafka, sinkPipe, kafka.producer, dbSemaphore))
-                        .merge(cronScheduler.mainLoop)
-                        .merge(cronScheduler.schemaRefresher)
-                        .merge(payloadAuditStream)
-                        .merge(wirelessStreams)
+                    val batchDispatchService = new BatchDispatchService(
+                      tiDbRepo,
+                      kafka.producer,
+                      metrics,
+                      java.util.UUID.randomUUID().toString,
+                      List(cfg.kafka.loadTopic, cfg.kafka.resultTopic),
+                      cfg.cron.batchDispatchLeaseSeconds,
+                      cfg.cron.scanRetryBackoffSeconds,
+                      cfg.cron.batchDispatchLeaseSeconds
+                    )
 
-                    Resource.make(
-                      tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, dbSemaphore) *>
-                        streams.compile.drain.start
-                    )(_.cancel)
+                    val cronScheduler = new CronScheduler(
+                      cfg.cron, cfg.ingest, tiDbRepo,
+                      backpressureService, batchDispatchService, metrics,
+                      schemaIntrospector, dbSemaphore
+                    )
+
+                    val healthRoutes = new HealthRoutes(oldTx)
+
+                    val httpPort = Port.fromInt(cfg.http.port).getOrElse(
+                      sys.error(s"Port ${cfg.http.port} validated by config but IP4s rejected it")
+                    )
+                    val serverResource = EmberServerBuilder.default[IO]
+                      .withPort(httpPort)
+                      .withHost(host"0.0.0.0")
+                      .withHttpApp(healthRoutes.routes.orNotFound)
+                      .build
+
+                    serverResource.flatMap { _ =>
+                      val payloadAuditStream = PayloadAuditConsumer.stream(
+                        cfg.kafka, tiDbRepo, metrics, kafka.producer
+                      )
+
+                      val wirelessStreams = WirelessConsumerService.allStreams(
+                        cfg.wireless, cfg.kafka.bootstrapServers, tiDbRepo, kafka.producer
+                      )
+
+                      val baseStreams =
+                        cronScheduler.mainLoop
+                          .merge(cronScheduler.schemaRefresher)
+                          .merge(payloadAuditStream)
+                          .merge(wirelessStreams)
+
+                      artifactOpt match
+                        case Some(artifact) =>
+                          log.info("event=startup status=consumers_enabled artifact_version={} cluster_id={}",
+                            artifact.artifact.schemaVersion, artifact.artifact.clusterId)
+                        case None =>
+                          log.info("event=startup status=consumers_disabled")
+
+                      val consumerStreams = artifactOpt match
+                        case Some(artifact) =>
+                          ScanRequestStream.run(cfg.kafka, artifact, tiDbRepo, dbSemaphore)
+                            .merge(TidbLoadStream.run(cfg.kafka, artifact, tiDbRepo, handler, dbSemaphore))
+                            .merge(TidbResultStream.run(cfg.kafka, artifact, tiDbRepo, dbSemaphore))
+                        case None =>
+                          Stream.empty
+
+                      val streams = baseStreams.merge(consumerStreams)
+
+                      Resource.make(
+                        tiDbRepo.ensureAllCursors(cfg.ingest.streamNames, dbSemaphore) *>
+                          streams.compile.drain.start
+                      )(_.cancel)
+                    }
                   }
                 }
               }
