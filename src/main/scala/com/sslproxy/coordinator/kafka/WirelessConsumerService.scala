@@ -223,7 +223,7 @@ object WirelessConsumerService:
     ConsumerSettings[IO, String, String]
       .withBootstrapServers(bootstrapServers)
       .withGroupId(groupId)
-      .withAutoOffsetReset(AutoOffsetReset.None)
+      .withAutoOffsetReset(AutoOffsetReset.Earliest)
       .withMaxPollRecords(maxPollRecords)
       .withProperties(
         "allow.auto.create.topics" -> "false",
