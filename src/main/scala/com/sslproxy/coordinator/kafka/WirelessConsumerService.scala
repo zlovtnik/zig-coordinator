@@ -26,7 +26,7 @@ object WirelessConsumerService:
       producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
     val settings = consumerSettings(cfg.macLookupConsumer, cfg.maxPollRecords, bootstrapServers)
-    wirelessStream(settings, cfg.macLookupTopic, cfg.consumersCount) { committable =>
+    wirelessStream(settings, cfg.macLookupTopic, cfg.consumersCount, bootstrapServers) { committable =>
       val payload = committable.record.value
       handleMacLookup(payload, cfg.macLookupReplyTopic, pgRepo, producer).as(committable.offset)
     }
@@ -38,7 +38,7 @@ object WirelessConsumerService:
       producer: KafkaProducer[IO, String, String]
   ): Stream[IO, Unit] =
     val settings = consumerSettings(cfg.networksAuthorizedConsumer, cfg.maxPollRecords, bootstrapServers)
-    wirelessStream(settings, cfg.networksAuthorizedTopic, cfg.consumersCount) { committable =>
+    wirelessStream(settings, cfg.networksAuthorizedTopic, cfg.consumersCount, bootstrapServers) { committable =>
       val payload = committable.record.value
       handleNetworksAuthorized(payload, cfg.networksAuthorizedReplyTopic, pgRepo, producer).as(committable.offset)
     }
@@ -51,7 +51,7 @@ object WirelessConsumerService:
   ): Stream[IO, Unit] =
     val settings = consumerSettings(cfg.probeFlushConsumer, cfg.maxPollRecords, bootstrapServers)
     val dlqTopic = cfg.probeFlushTopic + cfg.dlqSuffix
-    wirelessStream(settings, cfg.probeFlushTopic, cfg.consumersCount) { committable =>
+    wirelessStream(settings, cfg.probeFlushTopic, cfg.consumersCount, bootstrapServers) { committable =>
       val payload = committable.record.value
       handleProbeFlush(payload, pgRepo, producer, dlqTopic).as(committable.offset)
     }
@@ -69,12 +69,16 @@ object WirelessConsumerService:
   private def wirelessStream(
       settings: ConsumerSettings[IO, String, String],
       topic: String,
-      consumersCount: Int
+      consumersCount: Int,
+      bootstrapServers: String
   )(
       process: CommittableConsumerRecord[IO, String, String] => IO[CommittableOffset[IO]]
   ): Stream[IO, Unit] =
     Stream
-      .resource(fs2.kafka.KafkaConsumer.resource(settings))
+      .eval(KafkaComponents.waitForTopic(bootstrapServers, topic))
+      .flatMap(_ =>
+        Stream.resource(fs2.kafka.KafkaConsumer.resource(settings))
+      )
       .flatMap { consumer =>
         Stream.eval(consumer.subscribeTo(topic)) >>
         consumer.partitionedStream

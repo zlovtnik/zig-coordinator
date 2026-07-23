@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.domain.{PayloadAudit, ScanRequestRecord}
+import com.sslproxy.coordinator.kafka.KafkaComponents
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.tidb.TidbRepository
 import com.sslproxy.coordinator.util.Sha256Utils
@@ -39,7 +40,10 @@ object PayloadAuditConsumer:
       )
 
     Stream
-      .resource(KafkaConsumer.resource(consumerSettings))
+      .eval(KafkaComponents.waitForTopic(cfg.bootstrapServers, cfg.payloadAuditTopic))
+      .flatMap(_ =>
+        Stream.resource(KafkaConsumer.resource(consumerSettings))
+      )
       .flatMap { consumer =>
         Stream.eval(consumer.subscribeTo(cfg.payloadAuditTopic)) >>
           consumer.stream

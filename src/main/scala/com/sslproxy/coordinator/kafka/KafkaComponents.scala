@@ -6,6 +6,9 @@ import com.sslproxy.coordinator.tidb.{TidbLoad, TidbResult}
 import fs2.kafka.*
 import io.circe.parser.decode as circeDecode
 import io.circe.syntax.*
+import org.slf4j.LoggerFactory
+
+import scala.concurrent.duration.*
 
 final class KafkaComponents(
     val producer: KafkaProducer[IO, String, String],
@@ -13,9 +16,52 @@ final class KafkaComponents(
 )
 
 object KafkaComponents:
+  private val log = LoggerFactory.getLogger(getClass)
 
   def resource(cfg: KafkaCfg): Resource[IO, KafkaComponents] =
     createProducer(cfg).map(producer => KafkaComponents(producer, cfg))
+
+  /** Block until the topic exists on the broker or until `timeout` elapses.
+    * Uses a temporary consumer to probe `partitionsFor` with retry.
+    */
+  def waitForTopic(
+      bootstrapServers: String,
+      topic: String,
+      timeout: FiniteDuration = 30.seconds,
+      retryInterval: FiniteDuration = 2.seconds
+  ): IO[Unit] =
+    val settings = ConsumerSettings[IO, String, String]
+      .withBootstrapServers(bootstrapServers)
+      .withGroupId(s"preflight-${topic}-${System.currentTimeMillis()}")
+      .withProperties("allow.auto.create.topics" -> "false")
+
+    def loop(deadline: FiniteDuration): IO[Unit] =
+      KafkaConsumer.resource(settings).use { consumer =>
+        consumer.partitionsFor(topic).attempt.flatMap {
+          case Right(partitions) if partitions.isEmpty =>
+            IO(log.warn("event=topic_preflight status=empty topic={}", topic)) *>
+              retryOrTimeout(deadline)(loop(deadline))
+          case Right(_) =>
+            IO(log.info("event=topic_preflight status=ready topic={}", topic))
+          case Left(ex) if ex.isInstanceOf[org.apache.kafka.common.errors.UnknownTopicOrPartitionException] =>
+            IO(log.warn("event=topic_preflight status=waiting topic={} error=\"{}\"",
+              topic, ex.getMessage)) *>
+              retryOrTimeout(deadline)(loop(deadline))
+          case Left(ex) =>
+            IO.raiseError(ex)
+        }
+      }
+
+    def retryOrTimeout(deadline: FiniteDuration)(retry: => IO[Unit]): IO[Unit] =
+      IO.monotonic.flatMap { now =>
+        if now >= deadline then
+          IO.raiseError(new IllegalStateException(
+            s"topic $topic did not become available within $timeout"))
+        else
+          IO.sleep(retryInterval) *> retry
+      }
+
+    IO.monotonic.flatMap { start => loop(start + timeout) }
 
   /** Every processor gets its own KafkaConsumer resource. There is deliberately
     * no shared consumer here: a subscription and group identity are part of the
