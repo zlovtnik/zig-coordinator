@@ -857,13 +857,13 @@ class TidbRepository(xa: Transactor[IO]):
         probes.traverse { probe =>
           val ssid = probe.hcursor.get[String]("ssid").getOrElse("")
           val clientMac = probe.hcursor.get[String]("client_mac").getOrElse("")
-          val firstSeen = probe.hcursor.get[String]("first_seen").toOption.flatMap(parseTs).orNull
-          val lastSeen = probe.hcursor.get[String]("last_seen").toOption.flatMap(parseTs).orNull
+          val firstSeen = probe.hcursor.get[String]("first_seen").toOption.flatMap(parseTs)
+          val lastSeen = probe.hcursor.get[String]("last_seen").toOption.flatMap(parseTs)
           val probeCount = probe.hcursor.get[Long]("probe_count").getOrElse(1L)
-          val locationId = probe.hcursor.get[String]("location_id").toOption.orNull
+          val locationId = probe.hcursor.get[String]("location_id").toOption
           val observedBssid = probe.hcursor.get[String]("observed_bssid").toOption
             .orElse(probe.hcursor.get[String]("known_bssid").toOption)
-            .orElse(probe.hcursor.get[String]("bssid").toOption).orNull
+            .orElse(probe.hcursor.get[String]("bssid").toOption)
 
           sql"""INSERT INTO wireless_clients (ssid, client_mac, known_bssid, first_seen, last_seen,
                   probe_count, location_id, last_probe_batch_id)
