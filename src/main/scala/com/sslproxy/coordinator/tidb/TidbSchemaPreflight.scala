@@ -2,7 +2,7 @@ package com.sslproxy.coordinator.tidb
 
 import cats.effect.IO
 import com.sslproxy.coordinator.config.TiDbConfig
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 class TidbSchemaPreflight(transactor: TidbTransactor, config: TiDbConfig):
   import TidbSchemaPreflight.log
@@ -24,18 +24,15 @@ class TidbSchemaPreflight(transactor: TidbTransactor, config: TiDbConfig):
     else
       transactor.preflightCheck(allRequiredTables).flatMap { missing =>
         if missing.isEmpty then
-          IO(log.info("event=tidb_schema_preflight status=ok tables={}", allRequiredTables.size))
+          IO(log.info("tidb_schema_preflight", "status" -> "ok", "tables" -> allRequiredTables.size.toString))
         else
           val msg = s"TiDB sink schema objects unavailable: missing=[${missing.mkString(", ")}]; " +
             s"apply tidb/init/001_schema.sql to the TiDB database '${config.database}'"
           if config.warnOnly then
-            IO(log.warn("event=tidb_schema_preflight status=warn_only error=\"{}\"", sanitize(msg)))
+            IO(log.warn("tidb_schema_preflight", "status" -> "warn_only", "error" -> msg))
           else
             IO.raiseError(IllegalStateException(msg))
       }
 
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
-
 object TidbSchemaPreflight:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)

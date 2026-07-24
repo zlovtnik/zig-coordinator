@@ -4,7 +4,7 @@ import cats.effect.IO
 import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.tidb.{OutboxFailureDisposition, OutboxRecord, TidbRepository}
 import fs2.kafka.{KafkaProducer, ProducerRecord, ProducerRecords}
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 /** Publishes the transactional TiDB outbox. A broker acknowledgement followed
   * by a process crash can produce the same stable message key again; the
@@ -25,11 +25,8 @@ final class BatchDispatchService(
   def dispatchNext(): IO[Boolean] =
     repo.claimOutbox(ownerId, destinationTopics, leaseSeconds).flatMap {
       case Left(error) =>
-        IO(log.error(
-          "event=outbox_claim status=db_error operation={} error=\"{}\"",
-          error.operation,
-          sanitize(error.message)
-        )).as(false)
+        IO(log.error("outbox_claim", "status" -> "db_error",
+          "operation" -> error.operation, "error" -> error.message)).as(false)
       case Right(None) => IO.pure(false)
       case Right(Some(record)) => publish(record)
     }
@@ -50,26 +47,16 @@ final class BatchDispatchService(
     repo.acknowledgeOutbox(record).flatMap {
       case Right(true) =>
         IO(metrics.recordBatchDispatched()) *>
-          IO(log.info(
-            "event=outbox_publish status=published outbox_id={} topic={} message_key={} fence={}",
-            record.outboxId,
-            record.destinationTopic,
-            record.messageKey,
-            record.lease.fence
-          )).as(true)
+          IO(log.info("outbox_publish", "status" -> "published",
+            "outbox_id" -> record.outboxId, "topic" -> record.destinationTopic,
+            "message_key" -> record.messageKey, "fence" -> record.lease.fence.toString)).as(true)
       case Right(false) =>
-        IO(log.warn(
-          "event=outbox_publish status=lease_lost_after_publish outbox_id={} fence={}",
-          record.outboxId,
-          record.lease.fence
-        )).as(false)
+        IO(log.warn("outbox_publish", "status" -> "lease_lost_after_publish",
+          "outbox_id" -> record.outboxId, "fence" -> record.lease.fence.toString)).as(false)
       case Left(error) =>
-        IO(log.error(
-          "event=outbox_publish status=ack_failed outbox_id={} operation={} error=\"{}\"",
-          record.outboxId,
-          error.operation,
-          sanitize(error.message)
-        )).as(false)
+        IO(log.error("outbox_publish", "status" -> "ack_failed",
+          "outbox_id" -> record.outboxId, "operation" -> error.operation,
+          "error" -> error.message)).as(false)
     }
 
   private def fail(record: OutboxRecord, cause: Throwable): IO[Boolean] =
@@ -79,24 +66,14 @@ final class BatchDispatchService(
         val status = disposition match
           case OutboxFailureDisposition.RetryScheduled => "retry_scheduled"
           case OutboxFailureDisposition.Parked         => "parked"
-        IO(log.warn(
-          "event=outbox_publish status={} outbox_id={} attempt={} error=\"{}\"",
-          status,
-          record.outboxId,
-          record.attemptCount,
-          sanitize(message)
-        )).as(false)
+        IO(log.warn("outbox_publish", "status" -> status,
+          "outbox_id" -> record.outboxId, "attempt" -> record.attemptCount.toString,
+          "error" -> message)).as(false)
       case Left(error) =>
-        IO(log.error(
-          "event=outbox_publish status=fail_transition_failed outbox_id={} operation={} error=\"{}\"",
-          record.outboxId,
-          error.operation,
-          sanitize(error.message)
-        )).as(false)
+        IO(log.error("outbox_publish", "status" -> "fail_transition_failed",
+          "outbox_id" -> record.outboxId, "operation" -> error.operation,
+          "error" -> error.message)).as(false)
     }
 
-  private def sanitize(message: String): String =
-    if message == null then "" else message.replace('\n', ' ').replace('\r', ' ')
-
 object BatchDispatchService:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)

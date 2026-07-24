@@ -11,7 +11,7 @@ import com.sslproxy.coordinator.observability.CoordinatorMetrics
 import com.sslproxy.coordinator.tidb.TidbRepository
 import com.sslproxy.coordinator.sink.SchemaIntrospector
 import fs2.Stream
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import scala.concurrent.duration.*
 
@@ -51,7 +51,7 @@ class CronScheduler(
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
         backpressureService.checkAndAct.void.handleErrorWith { err =>
-          IO(log.error("event=cron_backpressure status=failed error=\"{}\"", sanitize(err.getMessage)))
+          IO(log.error("cron_backpressure", err, "status" -> "failed"))
         }
       }
 
@@ -59,7 +59,7 @@ class CronScheduler(
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
         processIngest().handleErrorWith { err =>
-          IO(log.error("event=cron_ingest status=failed error=\"{}\"", sanitize(err.getMessage)))
+          IO(log.error("cron_ingest", err, "status" -> "failed"))
         }
       }
 
@@ -67,7 +67,7 @@ class CronScheduler(
       .awakeEvery[IO](cfg.idleSleepMs.millis)
       .evalMap { _ =>
         (recoverStaleBatches() >> dispatchBatches()).handleErrorWith { err =>
-          IO(log.error("event=cron_dispatch status=failed error=\"{}\"", sanitize(err.getMessage)))
+          IO(log.error("cron_dispatch", err, "status" -> "failed"))
         }
       }
 
@@ -75,7 +75,7 @@ class CronScheduler(
       .awakeEvery[IO](10.seconds)
       .evalMap { _ =>
         shadowAudit().handleErrorWith { err =>
-          IO(log.error("event=cron_shadow_audit status=failed error=\"{}\"", sanitize(err.getMessage)))
+          IO(log.error("cron_shadow_audit", err, "status" -> "failed"))
         }
       }
 
@@ -84,7 +84,7 @@ class CronScheduler(
       .evalMap { _ =>
         (metrics.heartbeat() >> IO(metrics.incrementLoopCounter()) >> loopCounter.update(_ + 1))
           .handleErrorWith { err =>
-            IO(log.error("event=cron_metrics status=failed error=\"{}\"", sanitize(err.getMessage)))
+            IO(log.error("cron_metrics", err, "status" -> "failed"))
           }
       }
 
@@ -99,15 +99,16 @@ class CronScheduler(
 
     repo.pendingLedgerCount().flatMap {
       case Left(err) =>
-        IO(log.warn("event=ingest_ledger status=pending_count_failed operation={} error=\"{}\"",
-          err.operation, sanitize(err.message))) *>
+        IO(log.warn("ingest_ledger", "status" -> "pending_count_failed",
+          "operation" -> err.operation, "error" -> err.message)) *>
           IO(metrics.recordIngestInvocation(false))
 
       case Right(pendingCount) =>
-        val logPending = IO(log.info("event=ingest_ledger status=pending count={}", pendingCount))
+        val logPending = IO(log.info("ingest_ledger", "status" -> "pending", "count" -> pendingCount.toString))
         val throttleCheck = if pendingCount >= budget then
-          IO(log.info("event=backpressure status=throttled pending_count={} budget={} ingest_batch_size={}",
-            pendingCount, budget, cfg.ingestBatchSize))
+          IO(log.info("backpressure", "status" -> "throttled",
+            "pending_count" -> pendingCount.toString, "budget" -> budget.toString,
+            "ingest_batch_size" -> cfg.ingestBatchSize.toString))
         else IO.unit
 
         logPending *> throttleCheck *>
@@ -119,15 +120,15 @@ class CronScheduler(
             cfg.ingestBatchSize
           ).flatMap {
             case Left(err) =>
-              IO(log.error("event=ingest_ledger status=failed operation={} error=\"{}\"",
-                err.operation, sanitize(err.message))) *>
+              IO(log.error("ingest_ledger", "status" -> "failed",
+                "operation" -> err.operation, "error" -> err.message)) *>
                 IO(metrics.recordIngestInvocation(false))
 
             case Right(processed) =>
               IO(metrics.recordIngestInvocation(true)) *>
                 IO(metrics.recordIngestProcessed(processed)) *>
                 IO.whenA(processed > 0)(
-                  IO(log.info("event=ingest_ledger status=processed count={}", processed))
+                  IO(log.info("ingest_ledger", "status" -> "processed", "count" -> processed.toString))
                 )
           }
     }
@@ -135,11 +136,11 @@ class CronScheduler(
   private def recoverStaleBatches(): IO[Unit] =
     repo.recoverExpiredOutboxLeases().flatMap {
       case Left(err) =>
-        IO(log.error("event=outbox_lease_recovery status=failed operation={} error=\"{}\"",
-          err.operation, sanitize(err.message)))
+        IO(log.error("outbox_lease_recovery", "status" -> "failed",
+          "operation" -> err.operation, "error" -> err.message))
       case Right(count) =>
         IO.whenA(count > 0)(
-          IO(log.info("event=outbox_lease_recovery status=recovered count={}", count))
+          IO(log.info("outbox_lease_recovery", "status" -> "recovered", "count" -> count.toString))
         )
     }
 
@@ -162,20 +163,17 @@ class CronScheduler(
       else
         repo.generateShadowAlerts().flatMap {
           case Left(err) =>
-            IO(log.error("event=shadow_audit status=failed operation={} error=\"{}\"",
-              err.operation, sanitize(err.message))) *>
+            IO(log.error("shadow_audit", "status" -> "failed",
+              "operation" -> err.operation, "error" -> err.message)) *>
               lastShadowAuditMs.set(now)
 
           case Right(alerts) =>
             IO.whenA(alerts.nonEmpty)(
-              IO(log.info("event=shadow_audit status=alerts_generated count={} result=\"{}\"",
-                alerts.size, alerts))
+              IO(log.info("shadow_audit", "status" -> "alerts_generated",
+                "count" -> alerts.size.toString, "result" -> alerts.toString))
             ) *> lastShadowAuditMs.set(now)
         }
     }
 
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
-
 object CronScheduler:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)

@@ -117,14 +117,3 @@ class WirelessConsumerServiceSuite extends FunSuite:
 
   test("hashMac returns invalid for short string"):
     assertEquals(WirelessConsumerService.hashMac("ab"), "invalid")
-
-  // ========== sanitize ==========
-
-  test("sanitize replaces newlines"):
-    assertEquals(WirelessConsumerService.sanitize("line1\nline2"), "line1 line2")
-
-  test("sanitize replaces carriage returns"):
-    assertEquals(WirelessConsumerService.sanitize("line1\rline2"), "line1 line2")
-
-  test("sanitize returns empty string for null"):
-    assertEquals(WirelessConsumerService.sanitize(null), "")

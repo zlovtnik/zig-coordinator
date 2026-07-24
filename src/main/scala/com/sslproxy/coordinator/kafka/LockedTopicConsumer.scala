@@ -8,7 +8,7 @@ import com.sslproxy.coordinator.util.Sha256Utils
 import fs2.Stream
 import fs2.kafka.{CommittableConsumerRecord, ConsumerRecord, KafkaConsumer}
 import org.apache.kafka.common.TopicPartition
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 private[kafka] final case class CutoverOffsetGuardState(
     bootstrapped: Set[CutoffKey]
@@ -55,7 +55,7 @@ private[kafka] final case class LockedBrokerRecord(
   * failure, or database failure terminates this processor without committing.
   */
 private[kafka] object LockedTopicConsumer:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def stream(
       cfg: KafkaCfg,
@@ -144,14 +144,11 @@ private[kafka] object LockedTopicConsumer:
         messageKey = Option(record.key),
         payloadSha256 = Sha256Utils.sha256Hex(rawValue)
       )
-      _ <- IO(log.debug(
-        "event=locked_consumer_record status=authorized group={} topic={} partition={} offset={} cutoff={}",
-        groupId,
-        record.topic,
-        record.partition,
-        record.offset,
-        authorization.cutoffOffset
-      ))
+      _ <- IO(log.debug("locked_consumer_record", "status" -> "authorized",
+        "group" -> groupId, "topic" -> record.topic,
+        "partition" -> record.partition.toString,
+        "offset" -> record.offset.toString,
+        "cutoff" -> authorization.cutoffOffset.toString))
       _ <- process(LockedBrokerRecord(record, metadata, authorization))
       _ <- committable.offset.commit
     yield ()

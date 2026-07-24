@@ -2,7 +2,7 @@ package com.sslproxy.coordinator.tidb
 
 import cats.effect.IO
 import io.circe.Json
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 class TidbLoadHandler(
     payloadResolver: TidbPayloadResolver,
@@ -21,14 +21,14 @@ class TidbLoadHandler(
       payload  <- resolvePayload(resolved)
       rows     <- parseRows(target, payload)
       _        <- IO(log.info(
-        "event=tidb_load status=parsed batch_id={} stream_name={} input_rows={}",
-        load.batchId, load.streamName, rows.length))
+        "tidb_load", "status" -> "parsed",
+        "batch_id" -> load.batchId, "stream_name" -> load.streamName, "input_rows" -> rows.length.toString))
       result   <- transformAndInsert(resolved, target, rows)
       _        <- IO(log.info(
-        "event=tidb_load status=inserted batch_id={} stream_name={} result_status={} row_count={}",
-        load.batchId, load.streamName,
-        result.fold(_ => "failure", _ => "success"),
-        result.fold(_ => 0L, identity)))
+        "tidb_load", "status" -> "inserted",
+        "batch_id" -> load.batchId, "stream_name" -> load.streamName,
+        "result_status" -> result.fold(_ => "failure", _ => "success"),
+        "row_count" -> result.fold(_ => 0L, identity).toString))
       checksum  = TidbChecksum.checksum(target, payload)
       finalResult = result match
         case Left(err) => err
@@ -40,8 +40,9 @@ class TidbLoadHandler(
             TidbResult.success(resolved.jobId, resolved.batchId, rowCount.toInt, checksum, finishedAt)
     yield finalResult).handleError { err =>
       val errorClass = classifyError(err)
-      log.error("event=tidb_load status=failed batch_id={} stream_name={} error_class={} error=\"{}\"",
-        load.batchId, load.streamName, errorClass.wireValue, sanitize(err.getMessage))
+      log.error("tidb_load", err,
+        "status" -> "failed", "batch_id" -> load.batchId,
+        "stream_name" -> load.streamName, "error_class" -> errorClass.wireValue)
       TidbResult.failure(load.jobId, load.batchId, errorClass, err.getMessage, finishedAt)
     }
 
@@ -123,8 +124,5 @@ class TidbLoadHandler(
       case _: io.circe.ParsingFailure  => TidbErrorClass.Permanent
       case _                           => TidbErrorClass.classify(err)
 
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
-
 object TidbLoadHandler:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)

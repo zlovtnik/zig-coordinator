@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.sink
 import cats.effect.IO
 import com.sslproxy.coordinator.config.SystemRegistryConfig
 import com.sslproxy.coordinator.model.SystemContext
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 final class SystemRegistry(config: SystemRegistryConfig):
   import SystemRegistry.log
@@ -15,8 +15,9 @@ final class SystemRegistry(config: SystemRegistryConfig):
     if knownOrigins.contains(originLower) then IO.unit
     else
       val err = s"unknown origin '${ctx.origin}' not in known origins: ${knownOrigins.mkString(", ")}"
-      log.warn("event=system_registry status=unknown_origin origin={} known={}", ctx.origin, knownOrigins.mkString(","))
+      log.warn("system_registry", "status" -> "unknown_origin",
+        "origin" -> ctx.origin, "known" -> knownOrigins.mkString(","))
       IO.raiseError(IllegalArgumentException(err))
 
 object SystemRegistry:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)

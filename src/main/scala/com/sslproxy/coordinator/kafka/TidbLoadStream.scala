@@ -6,10 +6,10 @@ import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.tidb.{TidbLoadHandler, TidbRepository}
 import fs2.Stream
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 object TidbLoadStream:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def run(
       cfg: KafkaCfg,
@@ -24,24 +24,18 @@ object TidbLoadStream:
       dbSemaphore.permit.use { _ =>
         for
           load <- IO.fromEither(KafkaComponents.deserializeLoad(locked.record.value))
-          _ <- IO(log.info(
-            "event=tidb_load_consumer status=processing batch_id={} stream_name={} group={} partition={} offset={}",
-            load.batchId,
-            load.streamName,
-            locked.metadata.consumerGroup,
-            locked.metadata.partition,
-            locked.metadata.offset
-          ))
+          _ <- IO(log.info("tidb_load_consumer", "status" -> "processing",
+            "batch_id" -> load.batchId, "stream_name" -> load.streamName,
+            "group" -> locked.metadata.consumerGroup,
+            "partition" -> locked.metadata.partition.toString,
+            "offset" -> locked.metadata.offset.toString))
           result <- handler.handle(load)
           _ <- KafkaDatabaseResult.require(
             repo.recordLoadResultWithEvidence(load, result, locked.metadata)
           )
-          _ <- IO(log.info(
-            "event=tidb_load_consumer status=durable batch_id={} result_status={} row_count={}",
-            load.batchId,
-            result.status,
-            result.rowCount
-          ))
+          _ <- IO(log.info("tidb_load_consumer", "status" -> "durable",
+            "batch_id" -> load.batchId, "result_status" -> result.status,
+            "row_count" -> result.rowCount.toString))
         yield ()
       }
     }

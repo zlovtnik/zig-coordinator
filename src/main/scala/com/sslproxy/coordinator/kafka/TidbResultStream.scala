@@ -6,10 +6,10 @@ import com.sslproxy.coordinator.config.KafkaCfg
 import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.tidb.TidbRepository
 import fs2.Stream
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 object TidbResultStream:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def run(
       cfg: KafkaCfg,
@@ -27,13 +27,10 @@ object TidbResultStream:
             repo.recordResultWithEvidence(result, locked.metadata)
           )
         }
-        _ <- IO(log.info(
-          "event=tidb_result_consumer status=recorded batch_id={} result_status={} group={} partition={} offset={}",
-          result.batchId,
-          result.status,
-          locked.metadata.consumerGroup,
-          locked.metadata.partition,
-          locked.metadata.offset
-        ))
+        _ <- IO(log.info("tidb_result_consumer", "status" -> "recorded",
+          "batch_id" -> result.batchId, "result_status" -> result.status,
+          "group" -> locked.metadata.consumerGroup,
+          "partition" -> locked.metadata.partition.toString,
+          "offset" -> locked.metadata.offset.toString))
       yield ()
     }

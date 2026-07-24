@@ -5,7 +5,7 @@ import cats.effect.kernel.Ref
 import cats.syntax.traverse.*
 import doobie.*
 import doobie.implicits.*
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import scala.concurrent.duration.*
 
@@ -43,7 +43,8 @@ final class SchemaIntrospector private (xa: Transactor[IO], database: String, re
     tableNames
       .traverse { name =>
         loadTableMeta(name).map(m => Some(name -> m)).handleError { err =>
-          log.error("event=schema_introspect status=failed table={} error=\"{}\"", name, sanitize(err.getMessage))
+          log.error("schema_introspect", "status" -> "failed",
+            "table" -> name, "error" -> err.getMessage)
           None
         }
       }
@@ -60,11 +61,8 @@ final class SchemaIntrospector private (xa: Transactor[IO], database: String, re
         loadAll(tableNames).void
       }
 
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
-
 object SchemaIntrospector:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def apply(xa: Transactor[IO], database: String, refreshInterval: FiniteDuration): IO[SchemaIntrospector] =
     Ref.of[IO, Map[String, TableMeta]](Map.empty).map { ref =>

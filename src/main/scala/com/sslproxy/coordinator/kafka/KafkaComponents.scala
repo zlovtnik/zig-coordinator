@@ -7,7 +7,7 @@ import fs2.kafka.*
 import io.circe.parser.decode as circeDecode
 import io.circe.syntax.*
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.util.{Collections, Properties}
 import scala.concurrent.duration.*
@@ -18,7 +18,7 @@ final class KafkaComponents(
 )
 
 object KafkaComponents:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def resource(cfg: KafkaCfg): Resource[IO, KafkaComponents] =
     createProducer(cfg).map(producer => KafkaComponents(producer, cfg))
@@ -39,10 +39,10 @@ object KafkaComponents:
         if !existing.contains(topic) then
           val newTopic = new NewTopic(topic, numPartitions, replicationFactor)
           admin.createTopics(Collections.singletonList(newTopic)).all().get()
-          log.info("event=topic_provision status=created topic={} partitions={} replication={}",
-            topic, numPartitions, replicationFactor)
+          log.info("topic_provision", "status" -> "created",
+            "topic" -> topic, "partitions" -> numPartitions.toString, "replication" -> replicationFactor.toString)
         else
-          log.debug("event=topic_provision status=exists topic={}", topic)
+          log.debug("topic_provision", "status" -> "exists", "topic" -> topic)
       finally
         admin.close()
 
@@ -64,13 +64,13 @@ object KafkaComponents:
       KafkaConsumer.resource(settings).use { consumer =>
         consumer.partitionsFor(topic).attempt.flatMap {
           case Right(partitions) if partitions.isEmpty =>
-            IO(log.warn("event=topic_preflight status=empty topic={}", topic)) *>
+            IO(log.warn("topic_preflight", "status" -> "empty", "topic" -> topic)) *>
               retryOrTimeout(deadline)(loop(deadline))
           case Right(_) =>
-            IO(log.info("event=topic_preflight status=ready topic={}", topic))
+            IO(log.info("topic_preflight", "status" -> "ready", "topic" -> topic))
           case Left(ex) if ex.isInstanceOf[org.apache.kafka.common.errors.UnknownTopicOrPartitionException] =>
-            IO(log.warn("event=topic_preflight status=waiting topic={} error=\"{}\"",
-              topic, ex.getMessage)) *>
+            IO(log.warn("topic_preflight", "status" -> "waiting",
+              "topic" -> topic, "error" -> ex.getMessage)) *>
               retryOrTimeout(deadline)(loop(deadline))
           case Left(ex) =>
             IO.raiseError(ex)

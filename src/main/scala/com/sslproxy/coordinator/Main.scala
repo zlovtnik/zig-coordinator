@@ -18,12 +18,12 @@ import com.sslproxy.coordinator.tidb.*
 import doobie.Transactor
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.http4s.ember.server.EmberServerBuilder
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import scala.concurrent.duration.*
 
 object Main extends IOApp.Simple:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   override def run: IO[Unit] =
     val cfg = AppConfig.load
@@ -41,7 +41,7 @@ object Main extends IOApp.Simple:
     val metrics = new CoordinatorMetrics(meterRegistry)
 
     if !cfg.tidb.enabled then
-      log.warn("event=startup status=disabled tidb_sink=disabled")
+      log.warn("startup", "status" -> "disabled", "tidb_sink" -> "disabled")
       IO.println("TiDB sink disabled (set TIDB_ENABLED=true to enable)").void
     else
       val appResource: Resource[IO, Fiber[IO, Throwable, Unit]] =
@@ -55,7 +55,7 @@ object Main extends IOApp.Simple:
             val artifactIO =
               if cfg.runtime.consumersEnabled then
                 if cfg.cutover.devBypass then
-                  IO(log.warn("event=startup status=cutover_dev_bypass")) *>
+                  IO(log.warn("startup", "status" -> "cutover_dev_bypass")) *>
                     cats.effect.Clock[IO].realTimeInstant.map(t =>
                       Some(com.sslproxy.coordinator.cutover.VerifiedCutoverArtifact.devBypass(cfg.cutover.expectedClusterId, t))
                     )
@@ -121,10 +121,10 @@ object Main extends IOApp.Simple:
 
                       artifactOpt match
                         case Some(artifact) =>
-                          log.info("event=startup status=consumers_enabled artifact_version={} cluster_id={}",
-                            artifact.artifact.schemaVersion, artifact.artifact.clusterId)
+                          log.info("startup", "status" -> "consumers_enabled",
+                            "artifact_version" -> artifact.artifact.schemaVersion.toString, "cluster_id" -> artifact.artifact.clusterId)
                         case None =>
-                          log.info("event=startup status=consumers_disabled")
+                          log.info("startup", "status" -> "consumers_disabled")
 
                       val consumerStreams = artifactOpt match
                         case Some(artifact) =>
@@ -148,7 +148,7 @@ object Main extends IOApp.Simple:
           }
         }
 
-      log.info("event=startup status=starting tidb_host={} tidb_port={} tidb_database={}",
-        cfg.tidb.host, cfg.tidb.port, cfg.tidb.database)
+      log.info("startup", "status" -> "starting",
+        "tidb_host" -> cfg.tidb.host, "tidb_port" -> cfg.tidb.port.toString, "tidb_database" -> cfg.tidb.database)
 
       appResource.use(_.joinWithNever)

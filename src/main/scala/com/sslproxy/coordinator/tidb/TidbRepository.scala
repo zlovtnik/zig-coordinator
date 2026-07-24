@@ -10,7 +10,7 @@ import doobie.*
 import doobie.implicits.*
 import io.circe.{Json, parser as circeParser}
 import io.circe.syntax.*
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -854,8 +854,8 @@ class TidbRepository(xa: Transactor[IO]):
           .digest(probesJson.getBytes(java.nio.charset.StandardCharsets.UTF_8))
           .map("%02x".format(_)).mkString
 
-        log.info("event=probe_flush_batch status=parsed batch_id={} probe_count={} payload_bytes={}",
-          batchId, probes.length, probesJson.length)
+        log.info("probe_flush_batch", "status" -> "parsed",
+          "batch_id" -> batchId, "probe_count" -> probes.length.toString, "payload_bytes" -> probesJson.length.toString)
 
         probes.traverse { probe =>
           val ssid = probe.hcursor.get[String]("ssid").getOrElse("")
@@ -892,8 +892,8 @@ class TidbRepository(xa: Transactor[IO]):
                   last_probe_batch_id = VALUES(last_probe_batch_id)""".update.run
         }.map { affectedPerProbe =>
           val totalAffected = affectedPerProbe.sum
-          log.info("event=probe_flush_batch status=inserted batch_id={} total_affected_rows={}",
-            batchId, totalAffected)
+          log.info("probe_flush_batch", "status" -> "inserted",
+            "batch_id" -> batchId, "total_affected_rows" -> totalAffected.toString)
           totalAffected
         }
     }
@@ -902,7 +902,7 @@ class TidbRepository(xa: Transactor[IO]):
     fa.transact(xa)
       .map(Right(_))
       .handleError { cause =>
-        log.error("event=db_error operation={} error=\"{}\"", operation, sanitize(cause.getMessage))
+        log.error("db_error", cause, "operation" -> operation)
         TidbErrorClass.classify(cause) match
           case TidbErrorClass.Retryable => Left(DatabaseError.Retryable(operation, cause, cause.getMessage))
           case TidbErrorClass.Permanent => Left(DatabaseError.Permanent(operation, cause, cause.getMessage))
@@ -910,9 +910,6 @@ class TidbRepository(xa: Transactor[IO]):
 
   private def stableUuid(value: String): String =
     UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)).toString
-
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
 
   private def parseTs(s: String): Option[java.sql.Timestamp] =
     try
@@ -923,4 +920,4 @@ class TidbRepository(xa: Transactor[IO]):
       catch case _: Exception => None
 
 object TidbRepository:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)

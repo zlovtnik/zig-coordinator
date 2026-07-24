@@ -3,7 +3,7 @@ package com.sslproxy.coordinator.observability
 import cats.effect.IO
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.micrometer.core.instrument.{Counter, Gauge, MeterRegistry}
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.util.concurrent.{ConcurrentHashMap, atomic}
 import atomic.AtomicLong
@@ -109,13 +109,13 @@ class CoordinatorMetrics(registry: MeterRegistry):
 
   def heartbeat(): IO[Unit] =
     IO(heartbeatCounter.increment()) *>
-      IO(log.info("event=heartbeat loop_count={} pending_ledger_count={} backpressure_active={}",
-        loopAttemptsCounter.count().toLong,
-        pendingLedgerGauge.get(),
-        backpressureActiveGauge.get()
+      IO(log.info("heartbeat",
+        "loop_count" -> loopAttemptsCounter.count().toLong.toString,
+        "pending_ledger_count" -> pendingLedgerGauge.get().toString,
+        "backpressure_active" -> backpressureActiveGauge.get().toString
       ))
 
 object CoordinatorMetrics:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def apply(): CoordinatorMetrics = new CoordinatorMetrics(new SimpleMeterRegistry())

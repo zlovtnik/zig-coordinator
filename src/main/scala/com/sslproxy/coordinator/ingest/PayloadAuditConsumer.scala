@@ -12,14 +12,14 @@ import fs2.Stream
 import fs2.kafka.*
 import io.circe.Json
 import io.circe.parser as circeParser
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import scala.concurrent.duration.*
 
 object PayloadAuditConsumer:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
   private val StreamName = "proxy.payload_audit"
 
   def stream(
@@ -76,8 +76,8 @@ object PayloadAuditConsumer:
             "observed_at" -> Json.fromString(audit.observedAt)
           ).noSpaces
 
-          log.trace("event=payload_audit_ingest status=received payload_bytes={}",
-            payloadBytes.length: Integer)
+          log.trace("payload_audit_ingest", "status" -> "received",
+            "payload_bytes" -> payloadBytes.length.toString)
 
           Right(ScanRequestRecord(requestJson, rawJson, payloadSha256, StreamName, dedupeKey, audit.observedAt))
 
@@ -101,8 +101,8 @@ object PayloadAuditConsumer:
             case Right(count) =>
               IO(metrics.recordPayloadAuditIngested(count))
             case Left(dbErr) =>
-              IO(log.error("event=payload_audit_ingest status=failed operation={} error=\"{}\"",
-                dbErr.operation, sanitize(dbErr.message))) *>
+              IO(log.error("payload_audit_ingest", "status" -> "failed",
+                "operation" -> dbErr.operation, "error" -> dbErr.message)) *>
                 IO.raiseError(new RuntimeException(
                   s"${dbErr.operation}: ${dbErr.message}", dbErr.cause))
           }
@@ -130,13 +130,10 @@ object PayloadAuditConsumer:
         val original = circeParser.parse(rawJson).getOrElse(Json.fromString(rawJson))
         val dlqValue = Json.obj(
           "original" -> original,
-          "error" -> Json.fromString(sanitize(errorMsg))
+          "error" -> Json.fromString(errorMsg.replace('\n', ' ').replace('\r', ' '))
         ).noSpaces
         val record = ProducerRecord(dlqTopic, null, dlqValue)
         dlqProducer.produce(ProducerRecords.one(record)).flatten.void
-
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
 
 sealed trait PayloadAuditError
 object PayloadAuditError:

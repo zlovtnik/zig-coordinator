@@ -4,7 +4,7 @@ import cats.effect.{IO, Resource}
 import com.sslproxy.coordinator.config.TiDbConfig
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.circe.Json
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.sql.{Connection, PreparedStatement, Timestamp, Types}
 import java.time.{Instant, OffsetDateTime}
@@ -53,8 +53,9 @@ final class TidbTransactor private (
       f.handleErrorWith { err =>
         if attempt < retryMaxAttempts && TidbErrorClass.classify(err) == TidbErrorClass.Retryable then
           val delay = retryBaseDelay * (1L << (attempt - 1))
-          log.warn("event=tidb_retry status=retrying operation={} attempt={}/{} delay={}ms error=\"{}\"",
-            label, attempt, retryMaxAttempts, delay.toMillis, sanitize(err.getMessage))
+          log.warn("tidb_retry", "status" -> "retrying",
+            "operation" -> label, "attempt" -> s"$attempt/$retryMaxAttempts",
+            "delay" -> s"${delay.toMillis}ms", "error" -> err.getMessage)
           IO.sleep(delay) *> go(attempt + 1)
         else
           IO.raiseError(err)
@@ -627,18 +628,15 @@ final class TidbTransactor private (
     IO.blocking {
       try ds.close()
       finally tlsMaterial.foreach(_.delete())
-      log.info("TidbTransactor: HikariCP pool and TLS material closed")
+      log.info("tidb_pool_closed")
     }
 
   private def rollbackQuietly(conn: Connection): Unit =
     try conn.rollback()
     catch case _: Exception => ()
 
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
-
 object TidbTransactor:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def resource(config: TiDbConfig): Resource[IO, TidbTransactor] =
     Resource.make(allocate(config))(_.close())
@@ -649,7 +647,6 @@ object TidbTransactor:
   private def allocate(config: TiDbConfig): IO[TidbTransactor] =
     val maxRetries = 10
     val baseDelay: FiniteDuration = 3.seconds
-    val sanitizeFn = (msg: String) => if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
 
     def tryAllocate: IO[TidbTransactor] =
       IO.blocking {
@@ -674,8 +671,8 @@ object TidbTransactor:
 
         try
           val ds = new HikariDataSource(hikariConfig)
-          log.info("TidbTransactor: HikariCP pool allocated to {}:{}/{}",
-            config.host, config.port, config.database)
+          log.info("tidb_pool_allocated",
+            "host" -> config.host, "port" -> config.port.toString, "database" -> config.database)
           new TidbTransactor(ds, config, tlsMaterial)
         catch
           case error: Throwable =>
@@ -691,9 +688,9 @@ object TidbTransactor:
         tryAllocate.handleErrorWith { error =>
           val attemptNum = maxRetries - remaining + 1
           val delay = baseDelay * math.min(attemptNum, 5).toLong
-          log.warn("TidbTransactor: pool allocation attempt {}/{} failed: {} — retrying in {}s",
-            attemptNum.toString, maxRetries.toString, sanitizeFn(error.getMessage),
-            delay.toSeconds.toString)
+          log.warn("tidb_pool_retry",
+            "attempt" -> s"$attemptNum/$maxRetries", "error" -> error.getMessage,
+            "delay" -> s"${delay.toSeconds}s")
           IO.sleep(delay) *> retryWithBackoff(remaining - 1, error)
         }
 

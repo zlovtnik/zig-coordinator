@@ -5,7 +5,7 @@ import com.sslproxy.coordinator.tidb.TidbErrorClass
 import doobie.*
 import doobie.implicits.*
 import doobie.free.connection.raw
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import java.sql.{PreparedStatement, Types}
 import scala.concurrent.duration.*
@@ -42,8 +42,9 @@ class GenericTiDbSink(xa: Transactor[IO]):
     program.transact(xa).handleErrorWith { err =>
       if attempt < maxRetries && isRetryable(err) then
         val delay = baseDelay * (1L << (attempt - 1))
-        log.warn("event=generic_sink_retry status=retrying table={} attempt={}/{} delay={}ms error=\"{}\"",
-          tableMeta.tableName, attempt, maxRetries, delay.toMillis, sanitize(err.getMessage))
+        log.warn("generic_sink_retry", "status" -> "retrying",
+          "table" -> tableMeta.tableName, "attempt" -> s"$attempt/$maxRetries",
+          "delay" -> s"${delay.toMillis}ms", "error" -> err.getMessage)
         IO.sleep(delay) *> upsertWithRetry(tableMeta, row, attempt + 1)
       else
         IO.raiseError(err)
@@ -75,8 +76,10 @@ class GenericTiDbSink(xa: Transactor[IO]):
       program.transact(xa).handleErrorWith { err =>
         if attempt < maxRetries && isRetryable(err) then
           val delay = baseDelay * (1L << (attempt - 1))
-          log.warn("event=generic_sink_batch_retry status=retrying table={} attempt={}/{} rows={} delay={}ms error=\"{}\"",
-            tableMeta.tableName, attempt, maxRetries, rows.size, delay.toMillis, sanitize(err.getMessage))
+          log.warn("generic_sink_batch_retry", "status" -> "retrying",
+            "table" -> tableMeta.tableName, "attempt" -> s"$attempt/$maxRetries",
+            "rows" -> rows.size.toString, "delay" -> s"${delay.toMillis}ms",
+            "error" -> err.getMessage)
           IO.sleep(delay) *> batchUpsertWithRetry(tableMeta, rows, attempt + 1)
         else
           IO.raiseError(err)
@@ -109,8 +112,5 @@ class GenericTiDbSink(xa: Transactor[IO]):
   private def isRetryable(t: Throwable): Boolean =
     TidbErrorClass.classify(t) == TidbErrorClass.Retryable
 
-  private def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
-
 object GenericTiDbSink:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)

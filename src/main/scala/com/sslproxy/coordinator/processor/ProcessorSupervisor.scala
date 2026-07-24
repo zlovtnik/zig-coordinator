@@ -5,7 +5,7 @@ import cats.syntax.traverse.*
 import com.sslproxy.coordinator.config.ProcessorConfig
 import com.sslproxy.coordinator.tidb.TidbErrorClass
 import fs2.Stream
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import scala.concurrent.duration.*
 
@@ -78,19 +78,15 @@ final class ProcessorSupervisor private (
         case Left(error: TerminalProcessorError) =>
           val message = safeMessage(error)
           setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
-            IO(log.error(
-              "event=processor status=failed_terminal processor={} error=\"{}\"",
-              workload.id.value,
-              sanitize(message)
-            )) *> IO.never
+            IO(log.error("processor",
+              "status" -> "failed_terminal", "processor" -> workload.id.value,
+              "error" -> message)) *> IO.never
         case Left(error) if TidbErrorClass.classify(error) == TidbErrorClass.Permanent =>
           val message = safeMessage(error)
           setStatus(workload.id, ProcessorLifecycle.FailedTerminal, restartCount, Some(message)) *>
-            IO(log.error(
-              "event=processor status=failed_terminal processor={} error=\"{}\"",
-              workload.id.value,
-              sanitize(message)
-            )) *> IO.never
+            IO(log.error("processor",
+              "status" -> "failed_terminal", "processor" -> workload.id.value,
+              "error" -> message)) *> IO.never
         case Left(error) => retry(workload, restartCount, error)
       }
 
@@ -109,13 +105,10 @@ final class ProcessorSupervisor private (
     val message = safeMessage(error)
 
     setStatus(workload.id, ProcessorLifecycle.BackingOff, nextRestart, Some(message)) *>
-      IO(log.warn(
-        "event=processor status=backing_off processor={} restart_count={} delay_ms={} error=\"{}\"",
-        workload.id.value,
-        nextRestart,
-        delay.toMillis,
-        sanitize(message)
-      )) *>
+      IO(log.warn("processor",
+        "status" -> "backing_off", "processor" -> workload.id.value,
+        "restart_count" -> nextRestart.toString, "delay_ms" -> delay.toMillis.toString,
+        "error" -> message)) *>
       IO.sleep(delay) *>
       runForever(workload, nextRestart)
 
@@ -130,11 +123,8 @@ final class ProcessorSupervisor private (
   private def safeMessage(error: Throwable): String =
     Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
 
-  private def sanitize(message: String): String =
-    if message == null then "" else message.replace('\n', ' ').replace('\r', ' ')
-
 object ProcessorSupervisor:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def create(config: ProcessorConfig): IO[ProcessorSupervisor] =
     for

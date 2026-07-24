@@ -8,12 +8,12 @@ import fs2.Stream
 import fs2.kafka.*
 import io.circe.Json
 import io.circe.parser.parse as parseJson
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 import scala.concurrent.duration.*
 
 object WirelessConsumerService:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
   private val TopicPattern = """[A-Za-z0-9._-]{1,249}""".r
   private val SensorInboxPrefix = "_INBOX.atheros_sensor."
   private val MaxRetries = 3
@@ -100,22 +100,22 @@ object WirelessConsumerService:
       val result = for
         mac <- IO.fromOption(extractField(payload, "mac"))(
                  new IllegalArgumentException("missing mac field"))
-        _   <- IO(log.warn("event=mac_lookup status=processing mac_hash={}", hashMac(mac)))
+        _   <- IO(log.warn("mac_lookup", "status" -> "processing", "mac_hash" -> hashMac(mac)))
         _   <- pgRepo.lookupDeviceByMac(mac).flatMap {
                 case Right(Some(reply)) =>
                   val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
-                  IO(log.info("event=mac_lookup status=found reply_topic={} mac_hash={}",
-                    replyTopic, hashMac(mac))) *>
+                  IO(log.info("mac_lookup", "status" -> "found",
+                    "reply_topic" -> replyTopic, "mac_hash" -> hashMac(mac))) *>
                     publishReply(producer, replyTopic, reply)
                 case Right(None) =>
-                  IO(log.info("event=mac_lookup status=not_found mac_hash={}", hashMac(mac)))
+                  IO(log.info("mac_lookup", "status" -> "not_found", "mac_hash" -> hashMac(mac)))
                 case Left(err) =>
-                  IO(log.error("event=mac_lookup status=db_error error=\"{}\"", sanitize(err.message)))
+                  IO(log.error("mac_lookup", "status" -> "db_error", "error" -> err.message))
               }
       yield ()
 
       result.handleErrorWith { err =>
-        IO(log.warn("event=mac_lookup status=skip error=\"{}\"", sanitize(err.getMessage))) *> IO.unit
+        IO(log.warn("mac_lookup", "status" -> "skip", "error" -> err.getMessage)) *> IO.unit
       }
 
   private def handleNetworksAuthorized(
@@ -129,10 +129,10 @@ object WirelessConsumerService:
       pgRepo.listAuthorizedNetworks().flatMap {
         case Right(reply) =>
           val replyTopic = resolveReplyTopic(payload, defaultReplyTopic)
-          IO(log.info("event=networks_authorized status=ok reply_topic={}", replyTopic)) *>
+          IO(log.info("networks_authorized", "status" -> "ok", "reply_topic" -> replyTopic)) *>
             publishReply(producer, replyTopic, reply)
         case Left(err) =>
-          IO(log.error("event=networks_authorized status=db_error error=\"{}\"", sanitize(err.message)))
+          IO(log.error("networks_authorized", "status" -> "db_error", "error" -> err.message))
       }
 
   private def handleProbeFlush(
@@ -151,25 +151,26 @@ object WirelessConsumerService:
       dlqTopic: String,
       producer: KafkaProducer[IO, String, String]
   ): IO[Unit] =
-    IO(log.info("event=probe_flush status=processing payload_bytes={}", payload.length)) *>
+    IO(log.info("probe_flush", "status" -> "processing", "payload_bytes" -> payload.length.toString)) *>
       pgRepo.flushProbeBatch(payload).flatMap {
         case Right(count) =>
-          IO(log.info("event=probe_flush status=ok records_inserted={} payload_bytes={}", count, payload.length))
+          IO(log.info("probe_flush", "status" -> "ok",
+            "records_inserted" -> count.toString, "payload_bytes" -> payload.length.toString))
         case Left(err) if remaining > 1 =>
-          IO(log.warn("event=probe_flush status=retry attempts_remaining={} error=\"{}\"",
-            remaining - 1, sanitize(err.message))) *>
+          IO(log.warn("probe_flush", "status" -> "retry",
+            "attempts_remaining" -> (remaining - 1).toString, "error" -> err.message)) *>
             IO.sleep(RetryDelay) *>
             attemptWithRetry(payload, pgRepo, remaining - 1, dlqTopic, producer)
         case Left(err) =>
-          IO(log.error("event=probe_flush status=dlq topic={} error=\"{}\"",
-            dlqTopic, sanitize(err.message))) *>
+          IO(log.error("probe_flush", "status" -> "dlq",
+            "topic" -> dlqTopic, "error" -> err.message)) *>
             publishDlq(producer, dlqTopic, payload, err)
       }
 
   private[kafka] def resolveReplyTopic(payload: String, defaultTopic: String): String =
     extractField(payload, "reply_topic") match
       case Some(t) if isValidKafkaTopic(t) && isAllowedReplyTopic(t) =>
-        log.debug("event=resolve_reply_topic status=valid topic={}", t)
+        log.debug("resolve_reply_topic", "status" -> "valid", "topic" -> t)
         t
       case _ =>
         defaultTopic
@@ -190,9 +191,6 @@ object WirelessConsumerService:
   private[kafka] def hashMac(mac: String): String =
     if mac == null || mac.length < 4 then "invalid"
     else mac.take(2) + "***" + mac.takeRight(2)
-
-  private[kafka] def sanitize(msg: String): String =
-    if msg == null then "" else msg.replace('\n', ' ').replace('\r', ' ')
 
   private def publishReply(
       producer: KafkaProducer[IO, String, String],

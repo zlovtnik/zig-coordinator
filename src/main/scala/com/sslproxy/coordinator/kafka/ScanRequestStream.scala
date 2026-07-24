@@ -7,10 +7,10 @@ import com.sslproxy.coordinator.cutover.{CutoffKey, VerifiedCutoverArtifact}
 import com.sslproxy.coordinator.domain.ScanRequestRecord
 import com.sslproxy.coordinator.tidb.TidbRepository
 import fs2.Stream
-import org.slf4j.LoggerFactory
+import com.sslproxy.coordinator.observability.StructuredLogger
 
 object ScanRequestStream:
-  private val log = LoggerFactory.getLogger(getClass)
+  private val log = StructuredLogger(getClass)
 
   def run(
       cfg: KafkaCfg,
@@ -28,13 +28,11 @@ object ScanRequestStream:
             repo.recordScanRequestWithEvidence(request, locked.metadata)
           )
         }
-        _ <- IO(log.info(
-          "event=scan_request_consumer status={} stream_name={} group={} partition={} offset={}",
-          decision.disposition.databaseValue,
-          request.streamName,
-          locked.metadata.consumerGroup,
-          locked.metadata.partition,
-          locked.metadata.offset
-        ))
+        _ <- IO(log.info("scan_request_consumer",
+          "status" -> decision.disposition.databaseValue,
+          "stream_name" -> request.streamName,
+          "group" -> locked.metadata.consumerGroup,
+          "partition" -> locked.metadata.partition.toString,
+          "offset" -> locked.metadata.offset.toString))
       yield ()
     }
