@@ -310,6 +310,7 @@ Tests include:
 docker compose up -d tidb redpanda minio
 
 # Set required env vars and run
+export TIDB_ENABLED=true
 export TIDB_JDBC_URL=jdbc:mysql://localhost:3306/coordinator
 export TIDB_USER=root
 export TIDB_PASSWORD=...
@@ -325,6 +326,7 @@ sbt run
 ```sh
 docker run -d \
   -p 8081:8081 \
+  -e TIDB_ENABLED=true \
   -e TIDB_JDBC_URL=jdbc:mysql://host.docker.internal:3306/coordinator \
   -e TIDB_USER=root \
   -e TIDB_PASSWORD=... \
@@ -343,6 +345,7 @@ octopus:
     repository: ssl-proxy/octopus
     tag: latest
   env:
+    TIDB_ENABLED: "true"
     TIDB_JDBC_URL: jdbc:mysql://tidb:3306/coordinator
     TIDB_USER: root
     TIDB_PASSWORD:

@@ -12,9 +12,9 @@ object StringListConfigReader:
         case Right(cursors) =>
           cursors.foldRight(Right(Nil): Either[ConfigReaderFailures, List[String]]) { (c, acc) =>
             for
-              s   <- c.asString
+              s   <- c.asString.map(_.trim)
               tail <- acc
-            yield s :: tail
+            yield if s.nonEmpty then s :: tail else tail
           }
         case Left(_) =>
           cursor.asString.map(s => s.split(",").map(_.trim).filter(_.nonEmpty).toList)
