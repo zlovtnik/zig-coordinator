@@ -20,7 +20,15 @@ class TidbLoadHandler(
       target   <- resolveTarget(resolved)
       payload  <- resolvePayload(resolved)
       rows     <- parseRows(target, payload)
+      _        <- IO(log.info(
+        "event=tidb_load status=parsed batch_id={} stream_name={} input_rows={}",
+        load.batchId, load.streamName, rows.length))
       result   <- transformAndInsert(resolved, target, rows)
+      _        <- IO(log.info(
+        "event=tidb_load status=inserted batch_id={} stream_name={} result_status={} row_count={}",
+        load.batchId, load.streamName,
+        result.fold(_ => "failure", _ => "success"),
+        result.fold(_ => 0L, identity)))
       checksum  = TidbChecksum.checksum(target, payload)
       finalResult = result match
         case Left(err) => err
@@ -74,6 +82,12 @@ class TidbLoadHandler(
           sink.insertWirelessClientInventory(load.batchId, transformed.wirelessClientInventory)
         case TidbSinkTarget.WirelessProbeRequests =>
           sink.insertWirelessProbeRequests(load.batchId, transformed.wirelessProbeRequests)
+        case TidbSinkTarget.WirelessAttackSequence =>
+          sink.insertWirelessAttackSequence(load.batchId, transformed.wirelessAttackSequence)
+        case TidbSinkTarget.WirelessSequenceAlert =>
+          sink.insertWirelessSequenceAlert(load.batchId, transformed.wirelessSequenceAlert)
+        case TidbSinkTarget.WirelessHandshakeAlert =>
+          sink.insertWirelessHandshakeAlert(load.batchId, transformed.wirelessHandshakeAlert)
 
       insertIO.attempt.map {
         case Right(count) => Right(count)

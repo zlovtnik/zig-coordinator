@@ -854,6 +854,9 @@ class TidbRepository(xa: Transactor[IO]):
           .digest(probesJson.getBytes(java.nio.charset.StandardCharsets.UTF_8))
           .map("%02x".format(_)).mkString
 
+        log.info("event=probe_flush_batch status=parsed batch_id={} probe_count={} payload_bytes={}",
+          batchId, probes.length, probesJson.length)
+
         probes.traverse { probe =>
           val ssid = probe.hcursor.get[String]("ssid").getOrElse("")
           val clientMac = probe.hcursor.get[String]("client_mac").getOrElse("")
@@ -887,7 +890,12 @@ class TidbRepository(xa: Transactor[IO]):
                   known_bssid = COALESCE(VALUES(known_bssid), wireless_clients.known_bssid),
                   location_id = COALESCE(VALUES(location_id), wireless_clients.location_id),
                   last_probe_batch_id = VALUES(last_probe_batch_id)""".update.run
-        }.map(_.sum)
+        }.map { affectedPerProbe =>
+          val totalAffected = affectedPerProbe.sum
+          log.info("event=probe_flush_batch status=inserted batch_id={} total_affected_rows={}",
+            batchId, totalAffected)
+          totalAffected
+        }
     }
 
   private def runDb[A](operation: String)(fa: ConnectionIO[A]): IO[Either[DatabaseError, A]] =

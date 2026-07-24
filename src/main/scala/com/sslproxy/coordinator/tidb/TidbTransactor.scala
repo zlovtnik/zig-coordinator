@@ -80,14 +80,17 @@ final class TidbTransactor private (
 
   private def executeBatch(stmt: PreparedStatement, rows: Seq[Seq[Any]]): Long =
     var count = 0L
+    var totalAffected = 0L
     for row <- rows do
       for (value, idx) <- row.zipWithIndex do
         setParam(stmt, idx + 1, value)
       stmt.addBatch()
       count += 1
-      if count % batchSize == 0 then stmt.executeBatch(): Unit
-    if count % batchSize != 0 then stmt.executeBatch(): Unit
-    count
+      if count % batchSize == 0 then
+        totalAffected += stmt.executeBatch().map(_.toLong).sum
+    if count % batchSize != 0 then
+      totalAffected += stmt.executeBatch().map(_.toLong).sum
+    totalAffected
 
   private def setParam(stmt: PreparedStatement, idx: Int, value: Any): Unit =
     value match
@@ -433,6 +436,50 @@ final class TidbTransactor private (
         row.targetMac, row.targetBssid, optStr(row.ssid), None,
         jsonDetails("attack_tag" -> row.attackTag, "reconnect_window_ms" -> row.reconnectWindowMs),
         None
+      ))
+    }
+
+  override def insertWirelessAttackSequence(batchId: String, rows: List[WirelessAttackSequenceInsert]): IO[Long] =
+    withRetry("insert_wireless_attack_sequence") {
+      mergeWirelessAlerts(batchId, rows, "attack_sequence", row => Seq[Any](
+        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, null, null,
+        null, null, row.ssid, None,
+        jsonDetails(
+          "attack_chain" -> row.attackChain,
+          "first_event_at" -> row.firstEventAt.toString,
+          "last_event_at" -> row.lastEventAt.toString,
+          "factor_breakdown" -> row.factorBreakdown,
+          "explanation" -> row.explanation
+        ),
+        optStr(row.rawJson)
+      ))
+    }
+
+  override def insertWirelessSequenceAlert(batchId: String, rows: List[WirelessSequenceAlertInsert]): IO[Long] =
+    withRetry("insert_wireless_sequence_alert") {
+      mergeWirelessAlerts(batchId, rows, "sequence_alert", row => Seq[Any](
+        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, null, null,
+        row.sourceMac, row.bssid, optStr(row.ssid), None,
+        jsonDetails(
+          "session_key" -> row.sessionKey,
+          "attack_tag" -> row.attackTag,
+          "sequence" -> row.sequence,
+          "first_event_at" -> row.firstEventAt.toString,
+          "last_event_at" -> row.lastEventAt.toString,
+          "factor_breakdown" -> row.factorBreakdown,
+          "explanation" -> row.explanation
+        ),
+        optStr(row.rawJson)
+      ))
+    }
+
+  override def insertWirelessHandshakeAlert(batchId: String, rows: List[WirelessHandshakeAlertInsert]): IO[Long] =
+    withRetry("insert_wireless_handshake_alert") {
+      mergeWirelessAlerts(batchId, rows, "handshake", row => Seq[Any](
+        row.rowSequence, row.detectedAt, row.sensorId, row.locationId, row.iface, null,
+        row.clientMac, row.bssid, None, optLong(row.signalDbm),
+        jsonDetails("pmkid" -> row.pmkid),
+        optStr(row.rawJson)
       ))
     }
 

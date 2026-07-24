@@ -151,19 +151,20 @@ object WirelessConsumerService:
       dlqTopic: String,
       producer: KafkaProducer[IO, String, String]
   ): IO[Unit] =
-    pgRepo.flushProbeBatch(payload).flatMap {
-      case Right(count) =>
-        IO(log.info("event=probe_flush status=ok records_inserted={}", count))
-      case Left(err) if remaining > 1 =>
-        IO(log.warn("event=probe_flush status=retry attempts_remaining={} error=\"{}\"",
-          remaining - 1, sanitize(err.message))) *>
-          IO.sleep(RetryDelay) *>
-          attemptWithRetry(payload, pgRepo, remaining - 1, dlqTopic, producer)
-      case Left(err) =>
-        IO(log.error("event=probe_flush status=dlq topic={} error=\"{}\"",
-          dlqTopic, sanitize(err.message))) *>
-          publishDlq(producer, dlqTopic, payload, err)
-    }
+    IO(log.info("event=probe_flush status=processing payload_bytes={}", payload.length)) *>
+      pgRepo.flushProbeBatch(payload).flatMap {
+        case Right(count) =>
+          IO(log.info("event=probe_flush status=ok records_inserted={} payload_bytes={}", count, payload.length))
+        case Left(err) if remaining > 1 =>
+          IO(log.warn("event=probe_flush status=retry attempts_remaining={} error=\"{}\"",
+            remaining - 1, sanitize(err.message))) *>
+            IO.sleep(RetryDelay) *>
+            attemptWithRetry(payload, pgRepo, remaining - 1, dlqTopic, producer)
+        case Left(err) =>
+          IO(log.error("event=probe_flush status=dlq topic={} error=\"{}\"",
+            dlqTopic, sanitize(err.message))) *>
+            publishDlq(producer, dlqTopic, payload, err)
+      }
 
   private[kafka] def resolveReplyTopic(payload: String, defaultTopic: String): String =
     extractField(payload, "reply_topic") match
@@ -223,7 +224,7 @@ object WirelessConsumerService:
     ConsumerSettings[IO, String, String]
       .withBootstrapServers(bootstrapServers)
       .withGroupId(groupId)
-      .withAutoOffsetReset(AutoOffsetReset.Earliest)
+      .withAutoOffsetReset(AutoOffsetReset.None)
       .withMaxPollRecords(maxPollRecords)
       .withProperties(
         "allow.auto.create.topics" -> "false",

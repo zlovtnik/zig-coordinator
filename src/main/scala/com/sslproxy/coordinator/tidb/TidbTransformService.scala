@@ -20,6 +20,9 @@ object TidbTransformService:
       case TidbSinkTarget.WirelessPmfAttack       => TidbRowSet.empty.copy(wirelessPmfAttack = transformPmfAttack(rows))
       case TidbSinkTarget.WirelessClientInventory => TidbRowSet.empty.copy(wirelessClientInventory = transformClientInventory(rows))
       case TidbSinkTarget.WirelessProbeRequests   => TidbRowSet.empty.copy(wirelessProbeRequests = transformProbeRequests(rows))
+      case TidbSinkTarget.WirelessAttackSequence  => TidbRowSet.empty.copy(wirelessAttackSequence = transformAttackSequence(rows))
+      case TidbSinkTarget.WirelessSequenceAlert   => TidbRowSet.empty.copy(wirelessSequenceAlert = transformSequenceAlert(rows))
+      case TidbSinkTarget.WirelessHandshakeAlert  => TidbRowSet.empty.copy(wirelessHandshakeAlert = transformHandshakeAlert(rows))
 
   private def transformProxyRows(rows: List[Json]): TidbRowSet =
     val proxyRows = List.newBuilder[ProxyEventInsert]
@@ -289,6 +292,60 @@ object TidbTransformService:
         firstSeen = requiredTimestamp(row, "first_seen", "wireless.probe.flush"),
         lastSeen = requiredTimestamp(row, "last_seen", "wireless.probe.flush"),
         probeCount = requiredLong(row, "probe_count", "wireless.probe.flush")
+      )
+    }
+
+  private def transformAttackSequence(rows: List[Json]): List[WirelessAttackSequenceInsert] =
+    rows.zipWithIndex.map { case (row, index) =>
+      WirelessAttackSequenceInsert(
+        rowSequence = rowSequence(index, "wireless.alert.attack_sequence"),
+        detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.attack_sequence"),
+        sensorId = requiredString(row, "sensor_id", "wireless.alert.attack_sequence"),
+        locationId = requiredString(row, "location_id", "wireless.alert.attack_sequence"),
+        ssid = requiredString(row, "ssid", "wireless.alert.attack_sequence"),
+        attackChain = jsonArrayString(row, "attack_chain"),
+        firstEventAt = requiredTimestamp(row, "first_event_at", "wireless.alert.attack_sequence"),
+        lastEventAt = requiredTimestamp(row, "last_event_at", "wireless.alert.attack_sequence"),
+        factorBreakdown = jsonArrayString(row, "factor_breakdown"),
+        explanation = jsonArrayString(row, "explanation"),
+        rawJson = rawJson(row)
+      )
+    }
+
+  private def transformSequenceAlert(rows: List[Json]): List[WirelessSequenceAlertInsert] =
+    rows.zipWithIndex.map { case (row, index) =>
+      WirelessSequenceAlertInsert(
+        rowSequence = rowSequence(index, "wireless.alert.sequence"),
+        detectedAt = timestampAlias(row, "detected_at", "observed_at", "wireless.alert.sequence"),
+        sensorId = requiredString(row, "sensor_id", "wireless.alert.sequence"),
+        locationId = requiredString(row, "location_id", "wireless.alert.sequence"),
+        sessionKey = requiredString(row, "session_key", "wireless.alert.sequence"),
+        sourceMac = optionalString(row, "source_mac"),
+        bssid = optionalString(row, "bssid"),
+        ssid = optionalString(row, "ssid"),
+        attackTag = requiredString(row, "attack_tag", "wireless.alert.sequence"),
+        sequence = jsonArrayString(row, "sequence"),
+        firstEventAt = requiredTimestamp(row, "first_event_at", "wireless.alert.sequence"),
+        lastEventAt = requiredTimestamp(row, "last_event_at", "wireless.alert.sequence"),
+        factorBreakdown = jsonArrayString(row, "factor_breakdown"),
+        explanation = jsonArrayString(row, "explanation"),
+        rawJson = rawJson(row)
+      )
+    }
+
+  private def transformHandshakeAlert(rows: List[Json]): List[WirelessHandshakeAlertInsert] =
+    rows.zipWithIndex.map { case (row, index) =>
+      WirelessHandshakeAlertInsert(
+        rowSequence = rowSequence(index, "wifi.alert.handshake"),
+        detectedAt = requiredTimestamp(row, "observed_at", "wifi.alert.handshake"),
+        sensorId = requiredString(row, "sensor_id", "wifi.alert.handshake"),
+        locationId = requiredString(row, "location_id", "wifi.alert.handshake"),
+        iface = requiredString(row, "interface", "wifi.alert.handshake"),
+        bssid = requiredString(row, "bssid", "wifi.alert.handshake"),
+        clientMac = requiredString(row, "client_mac", "wifi.alert.handshake"),
+        signalDbm = optionalLong(row, "signal_dbm"),
+        pmkid = optionalString(row, "pmkid"),
+        rawJson = rawJson(row)
       )
     }
 
