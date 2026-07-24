@@ -80,7 +80,6 @@ final class TidbTransactor private (
     checkConnection().as(true).handleError(_ => false)
 
   private def executeBatch(stmt: PreparedStatement, rows: Seq[Seq[Any]]): Long =
-    import java.sql.Statement
     var count = 0L
     var totalAffected = 0L
     for row <- rows do
