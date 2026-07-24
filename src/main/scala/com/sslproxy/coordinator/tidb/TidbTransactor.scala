@@ -80,6 +80,7 @@ final class TidbTransactor private (
     checkConnection().as(true).handleError(_ => false)
 
   private def executeBatch(stmt: PreparedStatement, rows: Seq[Seq[Any]]): Long =
+    import java.sql.Statement
     var count = 0L
     var totalAffected = 0L
     for row <- rows do
@@ -88,10 +89,21 @@ final class TidbTransactor private (
       stmt.addBatch()
       count += 1
       if count % batchSize == 0 then
-        totalAffected += stmt.executeBatch().map(_.toLong).sum
-    if count % batchSize != 0 then
-      totalAffected += stmt.executeBatch().map(_.toLong).sum
+        totalAffected += sumBatchResults(stmt.executeBatch(), batchSize)
+    val remainder = (count % batchSize).toInt
+    if remainder != 0 then
+      totalAffected += sumBatchResults(stmt.executeBatch(), remainder)
     totalAffected
+
+  private def sumBatchResults(results: Array[Int], chunkSize: Int): Long =
+    import java.sql.Statement
+    if results.isEmpty then 0L
+    else if results.forall(_ == Statement.SUCCESS_NO_INFO) then chunkSize.toLong
+    else results.map {
+      case Statement.EXECUTE_FAILED => 0L
+      case n if n >= 0 => n.toLong
+      case _ => 0L
+    }.sum
 
   private def setParam(stmt: PreparedStatement, idx: Int, value: Any): Unit =
     value match
@@ -527,15 +539,20 @@ final class TidbTransactor private (
     }
 
   private def jsonDetails(keyValues: (String, Any)*): String =
-    val fields = keyValues.collect { case (k, v) if v != null =>
-      k -> (v match
-        case n: java.lang.Number => Json.fromLong(n.longValue)
-        case s: String => Json.fromString(s)
-        case b: Boolean => Json.fromBoolean(b)
-        case other => Json.fromString(other.toString)
-      )
+    val fields = keyValues.flatMap { case (k, v) =>
+      unwrapJsonValue(v).map(k -> _)
     }
     Json.obj(fields*).noSpaces
+
+  private def unwrapJsonValue(v: Any): Option[Json] =
+    v match
+      case null => None
+      case None => None
+      case Some(inner) => unwrapJsonValue(inner)
+      case n: java.lang.Number => Some(Json.fromLong(n.longValue))
+      case s: String => Some(Json.fromString(s))
+      case b: Boolean => Some(Json.fromBoolean(b))
+      case other => Some(Json.fromString(other.toString))
 
   private def bandForChannel(channel: Long): String =
     if channel >= 1 && channel <= 14 then "2.4GHz" else "5GHz"

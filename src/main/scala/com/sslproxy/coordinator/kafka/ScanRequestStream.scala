@@ -19,7 +19,18 @@ object ScanRequestStream:
       dbSemaphore: Semaphore[IO]
   ): Stream[IO, Unit] =
     LockedTopicConsumer.stream(cfg, cfg.scanConsumer, cfg.scanTopic, artifact,
-      repo.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).map(_.fold(_ => Set.empty[CutoffKey], identity))
+      repo.loadConsumerOffsets(cfg.scanConsumer, cfg.scanTopic).map(_.fold(
+        err => {
+          log.error("scan_request_consumer",
+            "status" -> "offset_load_failed",
+            "consumer_group" -> cfg.scanConsumer,
+            "topic" -> cfg.scanTopic,
+            "operation" -> err.operation,
+            "error" -> err.message)
+          Set.empty[CutoffKey]
+        },
+        identity
+      ))
     ) { locked =>
       for
         request <- IO.fromEither(ScanRequestRecord.decodeWire(locked.record.value))

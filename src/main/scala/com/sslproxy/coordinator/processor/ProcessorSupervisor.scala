@@ -22,7 +22,7 @@ final case class ProcessorStatus(
     lastError: Option[String]
 )
 
-final case class ProcessorWorkload(id: ProcessorId, stream: Stream[IO, Unit])
+final case class ProcessorWorkload(id: ProcessorId, stream: Stream[IO, Unit], startup: IO[Unit] = IO.unit)
 
 final class TerminalProcessorError(message: String, cause: Throwable = null)
     extends RuntimeException(message, cause)
@@ -71,6 +71,7 @@ final class ProcessorSupervisor private (
 
   private def runForever(workload: ProcessorWorkload, restartCount: Int): IO[Unit] =
     setStatus(workload.id, ProcessorLifecycle.Starting, restartCount, None) *>
+      workload.startup *>
       setStatus(workload.id, ProcessorLifecycle.Ready, restartCount, None) *>
       workload.stream.compile.drain.attempt.flatMap {
         case Right(_) =>
