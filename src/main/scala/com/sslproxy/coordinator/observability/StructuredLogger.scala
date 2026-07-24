@@ -15,30 +15,31 @@ import org.slf4j.{Logger, LoggerFactory}
 final class StructuredLogger private (underlying: Logger):
 
   def info(event: String, fields: (String, String)*): Unit =
-    val args = fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }.toArray
+    val args = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
     underlying.info(event, args: _*)
 
   def warn(event: String, fields: (String, String)*): Unit =
-    val args = fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }.toArray
+    val args = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
     underlying.warn(event, args: _*)
 
   def error(event: String, fields: (String, String)*): Unit =
-    val args = fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }.toArray
+    val args = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
     underlying.error(event, args: _*)
 
   def debug(event: String, fields: (String, String)*): Unit =
-    val args = fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }.toArray
+    val args = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
     underlying.debug(event, args: _*)
 
   def trace(event: String, fields: (String, String)*): Unit =
-    val args = fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }.toArray
+    val args = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
     underlying.trace(event, args: _*)
 
   /** Error with cause — the Throwable is appended as the final vararg so
     * Logback attaches it as a real `stack_trace` field.
     */
   def error(event: String, cause: Throwable, fields: (String, String)*): Unit =
-    val args = fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }.toArray :+ cause
+    val base = Array[AnyRef](fields.map { case (k, v) => StructuredArguments.keyValue(k, v) }: _*)
+    val args = base :+ cause
     underlying.error(event, args: _*)
 
 object StructuredLogger:
