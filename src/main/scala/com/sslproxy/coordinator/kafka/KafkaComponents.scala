@@ -100,7 +100,7 @@ object KafkaComponents:
     ConsumerSettings[IO, String, String]
       .withBootstrapServers(cfg.bootstrapServers)
       .withGroupId(groupId)
-      .withAutoOffsetReset(AutoOffsetReset.None)
+      .withAutoOffsetReset(AutoOffsetReset.Earliest)
       .withEnableAutoCommit(false)
       .withIsolationLevel(IsolationLevel.ReadCommitted)
       .withMaxPollRecords(cfg.maxPollRecords)

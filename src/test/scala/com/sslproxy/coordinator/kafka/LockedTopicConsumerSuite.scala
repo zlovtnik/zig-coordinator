@@ -93,7 +93,7 @@ class LockedTopicConsumerSuite extends FunSuite:
     val settings = KafkaComponents.consumerSettings(kafkaConfig, kafkaConfig.loadConsumer)
 
     assertEquals(settings.properties(ConsumerConfig.GROUP_ID_CONFIG), kafkaConfig.loadConsumer)
-    assertEquals(settings.properties(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG), "none")
+    assertEquals(settings.properties(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG), "earliest")
     assertEquals(settings.properties(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG), "false")
     assertEquals(settings.properties(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG), "false")
     assertEquals(settings.properties(ConsumerConfig.ISOLATION_LEVEL_CONFIG), "read_committed")

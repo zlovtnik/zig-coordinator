@@ -54,7 +54,13 @@ object Main extends IOApp.Simple:
           Resource.eval(preflight.validate()).flatMap { _ =>
             val artifactIO =
               if cfg.runtime.consumersEnabled then
-                CutoverArtifactLoader.loadAndVerify[IO](cfg.cutover).map(Some(_))
+                if cfg.cutover.devBypass then
+                  IO(log.warn("event=startup status=cutover_dev_bypass")) *>
+                    cats.effect.Clock[IO].realTimeInstant.map(t =>
+                      Some(com.sslproxy.coordinator.cutover.VerifiedCutoverArtifact.devBypass(cfg.cutover.expectedClusterId, t))
+                    )
+                else
+                  CutoverArtifactLoader.loadAndVerify[IO](cfg.cutover).map(Some(_))
               else
                 IO.pure(None)
 

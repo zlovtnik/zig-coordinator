@@ -126,7 +126,8 @@ final case class CutoverConfig(
     publicKeySha256: String,
     expectedSchemaVersion: Int,
     expectedClusterId: String,
-    requiredConsumerGroups: List[String]
+    requiredConsumerGroups: List[String],
+    devBypass: Boolean = false
 ) derives ConfigReader
 
 final case class AppConfigValidation(errors: NonEmptyList[String])
@@ -224,50 +225,52 @@ object AppConfig:
 
   private def activeRuntimeErrors(config: AppConfig): List[String] =
     val cutover = config.cutover
-    val configuredGroups = List(
-      config.kafka.scanConsumer,
-      config.kafka.resultConsumer,
-      config.kafka.payloadAuditConsumer,
-      config.kafka.loadConsumer,
-      config.wireless.macLookupConsumer,
-      config.wireless.networksAuthorizedConsumer,
-      config.wireless.probeFlushConsumer
-    )
-    val requiredGroups = cutover.requiredConsumerGroups
-    val keySources = List(cutover.publicKeyPath, cutover.publicKeyBase64).count(_.trim.nonEmpty)
-
-    List(
-      Option.when(!config.tidb.enabled)(
-        "an enabled runtime requires tidb.enabled=true"
-      ),
-      required(cutover.artifactPath, "cutover.artifact-path"),
-      required(cutover.signaturePath, "cutover.signature-path"),
-      Option.when(keySources != 1)(
-        "exactly one of cutover.public-key-path or cutover.public-key-base-64 is required"
-      ),
-      Option.when(Sha256Hex.findFirstIn(cutover.publicKeySha256).isEmpty)(
-        "cutover.public-key-sha-256 must be 64 lowercase hexadecimal characters"
-      ),
-      Option.when(cutover.expectedSchemaVersion <= 0)(
-        "cutover.expected-schema-version must be positive"
-      ),
-      required(cutover.expectedClusterId, "cutover.expected-cluster-id"),
-      Option.when(requiredGroups.isEmpty)(
-        "cutover.required-consumer-groups must not be empty"
-      ),
-      Option.when(requiredGroups.distinct.size != requiredGroups.size)(
-        "cutover.required-consumer-groups must not contain duplicates"
-      ),
-      Option.when(configuredGroups.exists(group => !isVersionedConsumerGroup(group)))(
-        "every configured consumer group must end in a non-zero version suffix such as -v1"
-      ),
-      Option.when(requiredGroups.exists(group => !isVersionedConsumerGroup(group)))(
-        "every cutover.required-consumer-groups entry must end in a non-zero version suffix such as -v1"
-      ),
-      Option.when(configuredGroups.toSet != requiredGroups.toSet)(
-        "cutover.required-consumer-groups must exactly match the configured consumer groups"
+    if cutover.devBypass then List.empty
+    else
+      val configuredGroups = List(
+        config.kafka.scanConsumer,
+        config.kafka.resultConsumer,
+        config.kafka.payloadAuditConsumer,
+        config.kafka.loadConsumer,
+        config.wireless.macLookupConsumer,
+        config.wireless.networksAuthorizedConsumer,
+        config.wireless.probeFlushConsumer
       )
-    ).flatten
+      val requiredGroups = cutover.requiredConsumerGroups
+      val keySources = List(cutover.publicKeyPath, cutover.publicKeyBase64).count(_.trim.nonEmpty)
+
+      List(
+        Option.when(!config.tidb.enabled)(
+          "an enabled runtime requires tidb.enabled=true"
+        ),
+        required(cutover.artifactPath, "cutover.artifact-path"),
+        required(cutover.signaturePath, "cutover.signature-path"),
+        Option.when(keySources != 1)(
+          "exactly one of cutover.public-key-path or cutover.public-key-base-64 is required"
+        ),
+        Option.when(Sha256Hex.findFirstIn(cutover.publicKeySha256).isEmpty)(
+          "cutover.public-key-sha-256 must be 64 lowercase hexadecimal characters"
+        ),
+        Option.when(cutover.expectedSchemaVersion <= 0)(
+          "cutover.expected-schema-version must be positive"
+        ),
+        required(cutover.expectedClusterId, "cutover.expected-cluster-id"),
+        Option.when(requiredGroups.isEmpty)(
+          "cutover.required-consumer-groups must not be empty"
+        ),
+        Option.when(requiredGroups.distinct.size != requiredGroups.size)(
+          "cutover.required-consumer-groups must not contain duplicates"
+        ),
+        Option.when(configuredGroups.exists(group => !isVersionedConsumerGroup(group)))(
+          "every configured consumer group must end in a non-zero version suffix such as -v1"
+        ),
+        Option.when(requiredGroups.exists(group => !isVersionedConsumerGroup(group)))(
+          "every cutover.required-consumer-groups entry must end in a non-zero version suffix such as -v1"
+        ),
+        Option.when(configuredGroups.toSet != requiredGroups.toSet)(
+          "cutover.required-consumer-groups must exactly match the configured consumer groups"
+        )
+      ).flatten
 
   private def required(value: String, path: String): Option[String] =
     Option.when(value.trim.isEmpty)(s"$path must not be blank")

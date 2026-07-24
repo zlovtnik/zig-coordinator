@@ -7,7 +7,8 @@ final class VerifiedCutoverArtifact private[cutover] (
     val canonicalArtifactSha256: String,
     val signatureSha256: String,
     val publicKeySha256: String,
-    val verifiedAt: Instant
+    val verifiedAt: Instant,
+    val devMode: Boolean = false
 ):
   private val cutoffIndex: Map[CutoffKey, Long] =
     artifact.cutoffs.iterator.map(cutoff => cutoff.key -> cutoff.cutoffOffset).toMap
@@ -28,13 +29,17 @@ final class VerifiedCutoverArtifact private[cutover] (
     )
 
   def cutoffFor(groupId: String, topic: String, partition: Int): Either[CutoverError, Long] =
-    val key = CutoffKey(groupId, topic, partition)
-    cutoffIndex.get(key).toRight(MissingCutoverOffset(groupId, topic, partition))
+    if devMode then Right(0L)
+    else
+      val key = CutoffKey(groupId, topic, partition)
+      cutoffIndex.get(key).toRight(MissingCutoverOffset(groupId, topic, partition))
 
   def requireCoverage(keys: Iterable[CutoffKey]): Either[CutoverError, Unit] =
-    val missing = keys.iterator.filterNot(cutoffIndex.contains).toList
-      .sortBy(key => (key.groupId, key.topic, key.partition))
-    Either.cond(missing.isEmpty, (), MissingCutoverCoverage(missing))
+    if devMode then Right(())
+    else
+      val missing = keys.iterator.filterNot(cutoffIndex.contains).toList
+        .sortBy(key => (key.groupId, key.topic, key.partition))
+      Either.cond(missing.isEmpty, (), MissingCutoverCoverage(missing))
 
   def authorizeRecordOffset(
       groupId: String,
@@ -42,20 +47,26 @@ final class VerifiedCutoverArtifact private[cutover] (
       partition: Int,
       recordOffset: Long
   ): Either[CutoverError, CutoverOffsetEvidence] =
-    cutoffFor(groupId, topic, partition).flatMap { cutoff =>
-      Either.cond(
-        recordOffset >= cutoff,
-        evidence(
-          CutoverEvidenceType.RecordOffsetAuthorization,
-          groupId,
-          topic,
-          partition,
-          cutoff,
-          recordOffset
-        ),
-        CutoverOffsetBelowCutoff(groupId, topic, partition, cutoff, recordOffset)
-      )
-    }
+    if devMode then
+      Right(evidence(
+        CutoverEvidenceType.RecordOffsetAuthorization,
+        groupId, topic, partition, 0L, recordOffset
+      ))
+    else
+      cutoffFor(groupId, topic, partition).flatMap { cutoff =>
+        Either.cond(
+          recordOffset >= cutoff,
+          evidence(
+            CutoverEvidenceType.RecordOffsetAuthorization,
+            groupId,
+            topic,
+            partition,
+            cutoff,
+            recordOffset
+          ),
+          CutoverOffsetBelowCutoff(groupId, topic, partition, cutoff, recordOffset)
+        )
+      }
 
   def verifyBootstrapPosition(
       groupId: String,
@@ -63,23 +74,29 @@ final class VerifiedCutoverArtifact private[cutover] (
       partition: Int,
       position: Long
   ): Either[CutoverError, CutoverOffsetEvidence] =
-    cutoffFor(groupId, topic, partition).flatMap { cutoff =>
-      if position < cutoff then
-        Left(CutoverOffsetBelowCutoff(groupId, topic, partition, cutoff, position))
-      else
-        Either.cond(
-          position == cutoff,
-          evidence(
-            CutoverEvidenceType.BootstrapPosition,
-            groupId,
-            topic,
-            partition,
-            cutoff,
-            position
-          ),
-          CutoverBootstrapOffsetMismatch(groupId, topic, partition, cutoff, position)
-        )
-    }
+    if devMode then
+      Right(evidence(
+        CutoverEvidenceType.BootstrapPosition,
+        groupId, topic, partition, 0L, position
+      ))
+    else
+      cutoffFor(groupId, topic, partition).flatMap { cutoff =>
+        if position < cutoff then
+          Left(CutoverOffsetBelowCutoff(groupId, topic, partition, cutoff, position))
+        else
+          Either.cond(
+            position == cutoff,
+            evidence(
+              CutoverEvidenceType.BootstrapPosition,
+              groupId,
+              topic,
+              partition,
+              cutoff,
+              position
+            ),
+            CutoverBootstrapOffsetMismatch(groupId, topic, partition, cutoff, position)
+          )
+      }
 
   private def evidence(
       evidenceType: CutoverEvidenceType,
@@ -97,4 +114,26 @@ final class VerifiedCutoverArtifact private[cutover] (
       partition,
       cutoffOffset,
       observedOffset
+    )
+
+object VerifiedCutoverArtifact:
+  private val DummySha256 = "0" * 64
+
+  def devBypass(clusterId: String, verifiedAt: Instant): VerifiedCutoverArtifact =
+    val artifact = CutoverArtifact(
+      schemaVersion = 1,
+      artifactId = "dev-bypass",
+      clusterId = clusterId,
+      capturedAt = verifiedAt,
+      groupVersion = 1,
+      cutoffs = List.empty,
+      artifactSha256 = DummySha256
+    )
+    new VerifiedCutoverArtifact(
+      artifact = artifact,
+      canonicalArtifactSha256 = DummySha256,
+      signatureSha256 = DummySha256,
+      publicKeySha256 = DummySha256,
+      verifiedAt = verifiedAt,
+      devMode = true
     )
