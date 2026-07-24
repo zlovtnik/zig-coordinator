@@ -6,8 +6,10 @@ import com.sslproxy.coordinator.tidb.{TidbLoad, TidbResult}
 import fs2.kafka.*
 import io.circe.parser.decode as circeDecode
 import io.circe.syntax.*
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, NewTopic}
 import org.slf4j.LoggerFactory
 
+import java.util.{Collections, Properties}
 import scala.concurrent.duration.*
 
 final class KafkaComponents(
@@ -21,8 +23,31 @@ object KafkaComponents:
   def resource(cfg: KafkaCfg): Resource[IO, KafkaComponents] =
     createProducer(cfg).map(producer => KafkaComponents(producer, cfg))
 
-  /** Block until the topic exists on the broker or until `timeout` elapses.
-    * Uses a temporary consumer to probe `partitionsFor` with retry.
+  /** Create the topic on the broker if it does not already exist. */
+  private def ensureTopicExists(
+      bootstrapServers: String,
+      topic: String,
+      numPartitions: Int = 3,
+      replicationFactor: Short = 1
+  ): IO[Unit] =
+    IO.blocking:
+      val props = new Properties()
+      props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
+      val admin = Admin.create(props)
+      try
+        val existing = admin.listTopics().names().get()
+        if !existing.contains(topic) then
+          val newTopic = new NewTopic(topic, numPartitions, replicationFactor)
+          admin.createTopics(Collections.singletonList(newTopic)).all().get()
+          log.info("event=topic_provision status=created topic={} partitions={} replication={}",
+            topic, numPartitions, replicationFactor)
+        else
+          log.debug("event=topic_provision status=exists topic={}", topic)
+      finally
+        admin.close()
+
+  /** Ensure the topic exists on the broker, then block until it is ready for
+    * consuming.  Uses a temporary consumer to probe `partitionsFor` with retry.
     */
   def waitForTopic(
       bootstrapServers: String,
@@ -61,7 +86,8 @@ object KafkaComponents:
           IO.sleep(retryInterval) *> retry
       }
 
-    IO.monotonic.flatMap { start => loop(start + timeout) }
+    ensureTopicExists(bootstrapServers, topic) *>
+      IO.monotonic.flatMap { start => loop(start + timeout) }
 
   /** Every processor gets its own KafkaConsumer resource. There is deliberately
     * no shared consumer here: a subscription and group identity are part of the
